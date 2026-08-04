@@ -11,6 +11,9 @@ import { AnthropicError } from './lib/anthropic'
 import { Auth } from './components/Auth'
 import { Settings } from './components/Settings'
 import { CardWorkspace } from './components/CardWorkspace'
+import { ShotLibrary } from './components/ShotLibrary'
+
+type View = 'worlds' | 'shots'
 
 function childType(t: CardType): CardType | null {
   const i = cardOrder.indexOf(t)
@@ -62,6 +65,7 @@ function Studio({ session }: { session: Session }) {
   const [error, setError] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [view, setView] = useState<View>('worlds')
 
   const saveTimer = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
@@ -300,21 +304,45 @@ function Studio({ session }: { session: Session }) {
       <header className="shrink-0 flex items-center justify-between gap-4 px-4 h-14 border-b border-edge">
         <div className="flex items-center gap-3 min-w-0">
           <span className="text-sm font-semibold text-slate-100">Deep Cosmos Studio</span>
-          <select
-            className="input py-1 w-auto max-w-[240px] text-xs"
-            value={worldId ?? ''}
-            onChange={(e) => setWorldId(e.target.value || null)}
-          >
-            {worlds.length === 0 && <option value="">— dünya yok —</option>}
-            {worlds.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
+
+          <div className="flex gap-1">
+            {([
+              ['worlds', 'Dünyalar'],
+              ['shots', 'Shot Library'],
+            ] as [View, string][]).map(([v, label]) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                  view === v
+                    ? 'bg-white/10 text-slate-100'
+                    : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
+                }`}
+              >
+                {label}
+              </button>
             ))}
-          </select>
-          <button className="btn-ghost py-1 text-xs" onClick={createWorld}>
-            + Dünya
-          </button>
+          </div>
+
+          {view === 'worlds' && (
+            <>
+              <select
+                className="input py-1 w-auto max-w-[220px] text-xs"
+                value={worldId ?? ''}
+                onChange={(e) => setWorldId(e.target.value || null)}
+              >
+                {worlds.length === 0 && <option value="">— dünya yok —</option>}
+                {worlds.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+              <button className="btn-ghost py-1 text-xs" onClick={createWorld}>
+                + Dünya
+              </button>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -331,6 +359,11 @@ function Studio({ session }: { session: Session }) {
         </div>
       </header>
 
+      {view === 'shots' ? (
+        <div className="flex-1 min-h-0">
+          <ShotLibrary session={session} />
+        </div>
+      ) : (
       <div className="flex-1 min-h-0 flex">
         <aside className="w-60 shrink-0 border-r border-edge overflow-auto p-3">
           {loading ? (
@@ -418,6 +451,7 @@ function Studio({ session }: { session: Session }) {
           )}
         </main>
       </div>
+      )}
 
       {showSettings && <Settings onClose={() => setShowSettings(false)} />}
     </div>

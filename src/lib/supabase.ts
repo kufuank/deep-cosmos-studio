@@ -36,6 +36,47 @@ export interface CardRow {
   updated_at: string
 }
 
+export interface ShotListRow {
+  id: string
+  owner: string
+  title: string
+  source_kind: 'file' | 'youtube'
+  source_ref: string
+  duration_seconds: number | null
+  status: 'draft' | 'analyzing' | 'ready' | 'locked' | 'failed'
+  error: string | null
+  notes: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ShotRow {
+  id: string
+  shot_list_id: string
+  owner: string
+  ordinal: number
+  start_seconds: number
+  end_seconds: number
+  timecode_start: string
+  timecode_end: string
+  shot_type: string
+  camera_angle: string
+  camera_movement: string
+  lens: string
+  dof: string
+  main_subject: string
+  primary_action: string
+  foreground: string
+  background: string
+  composition: string
+  lighting: string
+  camera_purpose: string
+  continuity_notes: string
+  technical_notes: string
+  audio_notes: string
+  created_at: string
+}
+
 /** Chat lives in its own table so a long conversation is not rewritten on
  *  every field edit. */
 export interface MessageRow {

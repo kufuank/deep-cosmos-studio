@@ -8,6 +8,8 @@ import { buildPrompts } from '../src/lib/prompt'
 import { buildSystemPrompt, applyUpdates } from '../src/agents/runner'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
+import { formatTimecode, dataUrlParts } from '../src/lib/video'
+import { recordShotTool } from '../src/agents/deconstruct'
 
 /** Stands in for the database-backed config, using the transcribed constants. */
 function cfg(type: CardType): AgentConfig {
@@ -135,6 +137,66 @@ const applied = applyUpdates(
 check('writes confirmed value', applied.planet_name?.value === 'Kepler-X')
 check('preserves state', applied.mass?.state === 'inferred')
 check('preserves reasoning', applied.mass?.reasoning === 'yoğunluktan türetildi')
+
+console.log('\n== timecode ==')
+check('zero', formatTimecode(0) === '00:00:00.000', formatTimecode(0))
+check('sub-second', formatTimecode(3.25) === '00:00:03.250', formatTimecode(3.25))
+check('minutes', formatTimecode(75.5) === '00:01:15.500', formatTimecode(75.5))
+check('hours', formatTimecode(3661.001) === '01:01:01.001', formatTimecode(3661.001))
+check('negative clamps to zero', formatTimecode(-5) === '00:00:00.000', formatTimecode(-5))
+check(
+  'monotonic across a boundary',
+  formatTimecode(59.999) < formatTimecode(60.0),
+  `${formatTimecode(59.999)} vs ${formatTimecode(60.0)}`,
+)
+
+console.log('\n== data url parsing ==')
+const parsed = dataUrlParts('data:image/jpeg;base64,AAECAw==')
+check('media type', parsed.mediaType === 'image/jpeg', parsed.mediaType)
+check('payload', parsed.base64 === 'AAECAw==', parsed.base64)
+let threw = false
+try {
+  dataUrlParts('https://example.com/not-a-data-url.jpg')
+} catch {
+  threw = true
+}
+check('rejects non data URL', threw)
+
+console.log('\n== shot list contract ==')
+// Every column the agent fills must exist on the table, or rows silently lose data.
+const DB_SHOT_COLUMNS = [
+  'shot_type',
+  'camera_angle',
+  'camera_movement',
+  'lens',
+  'dof',
+  'main_subject',
+  'primary_action',
+  'foreground',
+  'background',
+  'composition',
+  'lighting',
+  'camera_purpose',
+  'continuity_notes',
+  'technical_notes',
+  'audio_notes',
+]
+const schemaProps = Object.keys(
+  (recordShotTool.input_schema as { properties: Record<string, unknown> }).properties,
+)
+const required = (recordShotTool.input_schema as { required: string[] }).required
+check('15 analysis fields', schemaProps.length === 15, String(schemaProps.length))
+check(
+  'tool fields match table columns',
+  DB_SHOT_COLUMNS.every((c) => schemaProps.includes(c)) &&
+    schemaProps.every((c) => DB_SHOT_COLUMNS.includes(c)),
+  schemaProps.filter((c) => !DB_SHOT_COLUMNS.includes(c)).join(',') || 'ok',
+)
+check('all fields required', required.length === schemaProps.length)
+check(
+  'audio field states it cannot be determined',
+  JSON.stringify(recordShotTool.input_schema).includes('Cannot be determined'),
+)
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)
 process.exit(failures === 0 ? 0 : 1)
