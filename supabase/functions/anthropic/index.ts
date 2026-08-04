@@ -63,8 +63,15 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: corsHeaders(origin) })
   }
+
+  // Configuration check. Reports only whether the key exists, never its value or
+  // any part of it, so it is safe to answer before resolving a user.
+  if (req.method === 'GET') {
+    return json({ ok: true, key_configured: Boolean(Deno.env.get('ANTHROPIC_API_KEY')) }, 200, origin)
+  }
+
   if (req.method !== 'POST') {
-    return json({ error: 'Yalnızca POST destekleniyor.' }, 405, origin)
+    return json({ error: 'Yalnızca POST veya GET destekleniyor.' }, 405, origin)
   }
 
   const userId = await resolveUser(req)
