@@ -6,6 +6,20 @@ import { schemas, cardOrder, allFields } from '../src/schemas'
 import type { CardFields, CardType } from '../src/schemas'
 import { buildPrompts } from '../src/lib/prompt'
 import { buildSystemPrompt, applyUpdates } from '../src/agents/runner'
+import { agentInstructions, protocolText } from '../src/agents/instructions'
+import type { AgentConfig } from '../src/agents/config'
+
+/** Stands in for the database-backed config, using the transcribed constants. */
+function cfg(type: CardType): AgentConfig {
+  return {
+    agent: type,
+    version: 0,
+    role: agentInstructions[type].role,
+    knowledge: agentInstructions[type].knowledge,
+    protocol: protocolText(type),
+    fallback: true,
+  }
+}
 
 let failures = 0
 function check(name: string, cond: boolean, detail = '') {
@@ -80,10 +94,12 @@ const total = allFields(schemas.planet).length
 check('reports missing count', sparse[0].missing.length === total - 3, `${sparse[0].missing.length} vs ${total - 3}`)
 
 console.log('\n== system prompt ==')
-const sys = buildSystemPrompt('species', speciesFields, {
-  planet: planetFields,
-  ecosystem: ecoFields,
-})
+const sys = buildSystemPrompt(
+  'species',
+  speciesFields,
+  { planet: planetFields, ecosystem: ecoFields },
+  cfg('species'),
+)
 check('names the agent role', sys.includes('Species Agent'))
 check('includes protocol', sys.includes('PROTOCOL'))
 check('marks ancestors immutable', sys.includes('FIXED AND IMMUTABLE'))
@@ -91,7 +107,12 @@ check('lists current sheet state', sys.includes('CURRENT SHEET STATE'))
 check('instructs Turkish conversation', sys.includes('Turkish'))
 
 // A partially filled sheet must show both resolved values and MISSING markers.
-const partial = buildSystemPrompt('species', fill('species', 5), { planet: planetFields })
+const partial = buildSystemPrompt(
+  'species',
+  fill('species', 5),
+  { planet: planetFields },
+  cfg('species'),
+)
 const speciesTotal = allFields(schemas.species).length
 check(
   'flags exactly the unfilled fields',
@@ -99,7 +120,7 @@ check(
 )
 check('shows resolved values with state', partial.includes('(confirmed) = TEST_SPECIES_NAME'))
 
-const emptySys = buildSystemPrompt('planet', {}, {})
+const emptySys = buildSystemPrompt('planet', {}, {}, cfg('planet'))
 check('root card has no inherited block', !emptySys.includes('INHERITED CONSTRAINTS'))
 check('root card lists all fields missing', (emptySys.match(/— MISSING —/g) ?? []).length === total)
 

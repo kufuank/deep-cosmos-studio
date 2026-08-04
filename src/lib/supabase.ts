@@ -30,17 +30,21 @@ export interface CardRow {
   parent_id: string | null
   title: string
   fields: CardFields
-  chat: ChatEntry[]
   status: 'draft' | 'locked'
   locked_at: string | null
   created_at: string
   updated_at: string
 }
 
-export interface ChatEntry {
+/** Chat lives in its own table so a long conversation is not rewritten on
+ *  every field edit. */
+export interface MessageRow {
+  id: string
+  card_id: string
+  owner: string
   role: 'user' | 'assistant'
   text: string
-  /** Field keys written during this assistant turn, for the transcript. */
-  wrote?: string[]
-  at: string
+  /** Field keys written during this assistant turn, shown in the transcript. */
+  wrote: string[]
+  created_at: string
 }

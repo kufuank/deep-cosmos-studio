@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
-import type { CardRow, ChatEntry, WorldRow } from './lib/supabase'
+import type { CardRow, MessageRow, WorldRow } from './lib/supabase'
 import { cardOrder, schemas } from './schemas'
 import type { CardFields, CardType } from './schemas'
 import { runAgentTurn, applyUpdates } from './agents/runner'
+import { clearAgentConfigCache } from './agents/config'
 import { useSettings } from './lib/settings'
 import { AnthropicError } from './lib/anthropic'
 import { Auth } from './components/Auth'
@@ -16,7 +17,7 @@ function childType(t: CardType): CardType | null {
   return i >= 0 && i < cardOrder.length - 1 ? cardOrder[i + 1] : null
 }
 
-/** Best-guess title for a card, taken from its name field. */
+/** The field whose value names the card. */
 const TITLE_KEY: Record<CardType, string> = {
   planet: 'planet_name',
   ecosystem: 'ecosystem_name',
@@ -33,23 +34,29 @@ export default function App() {
       setSession(data.session)
       setReady(true)
     })
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s))
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+      setSession(s)
+      clearAgentConfigCache()
+    })
     return () => sub.subscription.unsubscribe()
   }, [])
 
   if (!ready) {
-    return <div className="min-h-screen grid place-items-center text-slate-600 text-sm">Yükleniyor…</div>
+    return (
+      <div className="min-h-screen grid place-items-center text-slate-600 text-sm">Yükleniyor…</div>
+    )
   }
   if (!session) return <Auth />
   return <Studio session={session} />
 }
 
 function Studio({ session }: { session: Session }) {
-  const { apiKey, model } = useSettings()
+  const { model } = useSettings()
   const [worlds, setWorlds] = useState<WorldRow[]>([])
   const [worldId, setWorldId] = useState<string | null>(null)
   const [cards, setCards] = useState<CardRow[]>([])
   const [cardId, setCardId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<MessageRow[]>([])
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -63,24 +70,24 @@ function Studio({ session }: { session: Session }) {
       .from('dc_worlds')
       .select('*')
       .order('updated_at', { ascending: false })
+    setLoading(false)
     if (error) {
       setError(error.message)
       return
     }
     setWorlds(data ?? [])
-    setLoading(false)
-    if (!worldId && data?.length) setWorldId(data[0].id)
-  }, [worldId])
-
-  useEffect(() => {
-    void loadWorlds()
-    // Intentionally once — worlds reload explicitly after mutations.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setWorldId((prev) => prev ?? data?.[0]?.id ?? null)
   }, [])
 
   useEffect(() => {
+    void loadWorlds()
+  }, [loadWorlds])
+
+  // Cards for the active world
+  useEffect(() => {
     if (!worldId) {
       setCards([])
+      setCardId(null)
       return
     }
     void (async () => {
@@ -99,6 +106,31 @@ function Studio({ session }: { session: Session }) {
     })()
   }, [worldId])
 
+  // Messages for the active card
+  useEffect(() => {
+    if (!cardId) {
+      setMessages([])
+      return
+    }
+    let alive = true
+    void (async () => {
+      const { data, error } = await supabase
+        .from('dc_messages')
+        .select('*')
+        .eq('card_id', cardId)
+        .order('created_at', { ascending: true })
+      if (!alive) return
+      if (error) {
+        setError(error.message)
+        return
+      }
+      setMessages((data ?? []) as MessageRow[])
+    })()
+    return () => {
+      alive = false
+    }
+  }, [cardId])
+
   const card = useMemo(() => cards.find((c) => c.id === cardId) ?? null, [cards, cardId])
 
   /** Walk parent_id up the chain and collect each ancestor's fields. */
@@ -109,7 +141,8 @@ function Studio({ session }: { session: Session }) {
     let guard = 0
     while (cur && guard++ < 8) {
       out[cur.type] = cur.fields
-      cur = cur.parent_id ? cards.find((c) => c.id === cur!.parent_id) : undefined
+      const parentId: string | null = cur.parent_id
+      cur = parentId ? cards.find((c) => c.id === parentId) : undefined
     }
     return out
   }, [card, cards])
@@ -164,7 +197,7 @@ function Studio({ session }: { session: Session }) {
 
   function onFieldChange(key: string, value: string) {
     if (!card) return
-    const nextFields: CardRow['fields'] = {
+    const nextFields: CardFields = {
       ...card.fields,
       [key]: { value, state: 'confirmed' },
     }
@@ -175,24 +208,26 @@ function Studio({ session }: { session: Session }) {
 
   async function onSend(text: string) {
     if (!card) return
-    if (!apiKey) {
-      setShowSettings(true)
-      setError('Önce Anthropic API anahtarınızı girin.')
-      return
-    }
     setError(null)
     setBusy(true)
 
-    const userEntry: ChatEntry = { role: 'user', text, at: new Date().toISOString() }
-    updateCardLocal(card.id, (c) => ({ ...c, chat: [...c.chat, userEntry] }))
+    const optimistic: MessageRow = {
+      id: `tmp-${Date.now()}`,
+      card_id: card.id,
+      owner: session.user.id,
+      role: 'user',
+      text,
+      wrote: [],
+      created_at: new Date().toISOString(),
+    }
+    setMessages((m) => [...m, optimistic])
 
     try {
       // History is text-only: the system prompt is rebuilt each turn with the
       // full current sheet state, so tool blocks need not persist.
-      const history = card.chat.map((m) => ({ role: m.role, content: m.text }))
+      const history = messages.map((m) => ({ role: m.role, content: m.text }))
 
       const res = await runAgentTurn({
-        apiKey,
         model,
         type: card.type,
         fields: card.fields,
@@ -205,16 +240,26 @@ function Studio({ session }: { session: Session }) {
       const titleUpdate = res.updates.find((u) => u.key === TITLE_KEY[card.type])
       const title = titleUpdate ? titleUpdate.value : card.title
 
-      const assistantEntry: ChatEntry = {
-        role: 'assistant',
-        text: res.text || '(Ajan yalnızca alanları güncelledi.)',
-        wrote: res.updates.map((u) => u.key),
-        at: new Date().toISOString(),
-      }
-      const nextChat = [...card.chat, userEntry, assistantEntry]
+      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, title }))
+      persistCard(card.id, { fields: nextFields, title }, true)
 
-      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, chat: nextChat, title }))
-      persistCard(card.id, { fields: nextFields, chat: nextChat, title }, true)
+      const { data, error } = await supabase
+        .from('dc_messages')
+        .insert([
+          { card_id: card.id, owner: session.user.id, role: 'user', text },
+          {
+            card_id: card.id,
+            owner: session.user.id,
+            role: 'assistant',
+            text: res.text || '(Ajan yalnızca alanları güncelledi.)',
+            wrote: res.updates.map((u) => u.key),
+          },
+        ])
+        .select()
+      if (error) throw error
+
+      // Swap the optimistic bubble for the persisted rows.
+      setMessages((m) => [...m.filter((x) => x.id !== optimistic.id), ...((data ?? []) as MessageRow[])])
     } catch (e) {
       setError(
         e instanceof AnthropicError
@@ -223,8 +268,7 @@ function Studio({ session }: { session: Session }) {
             ? e.message
             : 'Beklenmeyen bir hata oluştu.',
       )
-      // Drop the optimistic user bubble so the message can be retried cleanly.
-      updateCardLocal(card.id, (c) => ({ ...c, chat: c.chat.slice(0, -1) }))
+      setMessages((m) => m.filter((x) => x.id !== optimistic.id))
     } finally {
       setBusy(false)
     }
@@ -274,9 +318,6 @@ function Studio({ session }: { session: Session }) {
         </div>
 
         <div className="flex items-center gap-2">
-          {!apiKey && (
-            <span className="text-[11px] text-amber-400">API anahtarı gerekli</span>
-          )}
           <button className="btn-ghost py-1 text-xs" onClick={() => setShowSettings(true)}>
             Ayarlar
           </button>
@@ -291,7 +332,6 @@ function Studio({ session }: { session: Session }) {
       </header>
 
       <div className="flex-1 min-h-0 flex">
-        {/* Card chain sidebar */}
         <aside className="w-60 shrink-0 border-r border-edge overflow-auto p-3">
           {loading ? (
             <p className="text-xs text-slate-600">Yükleniyor…</p>
@@ -304,45 +344,43 @@ function Studio({ session }: { session: Session }) {
             </div>
           ) : (
             <>
-              <div className="space-y-1">
-                {cardOrder.map((t) => {
-                  const group = cards.filter((c) => c.type === t)
-                  if (!group.length) return null
-                  return (
-                    <div key={t} className="mb-3">
-                      <p className="text-[10px] uppercase tracking-wider text-slate-600 mb-1 px-1">
-                        {schemas[t].label}
-                      </p>
-                      {group.map((c) => {
-                        const ct = childType(c.type)
-                        return (
-                          <div key={c.id}>
+              {cardOrder.map((t) => {
+                const group = cards.filter((c) => c.type === t)
+                if (!group.length) return null
+                return (
+                  <div key={t} className="mb-3">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-600 mb-1 px-1">
+                      {schemas[t].label}
+                    </p>
+                    {group.map((c) => {
+                      const ct = childType(c.type)
+                      return (
+                        <div key={c.id}>
+                          <button
+                            onClick={() => setCardId(c.id)}
+                            className={`w-full text-left px-2 py-1.5 rounded text-xs truncate transition-colors ${
+                              cardId === c.id
+                                ? 'bg-sky-500/15 text-sky-200'
+                                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
+                            }`}
+                          >
+                            {c.status === 'locked' && <span className="text-emerald-400 mr-1">●</span>}
+                            {c.title || `İsimsiz ${schemas[c.type].label}`}
+                          </button>
+                          {ct && (
                             <button
-                              onClick={() => setCardId(c.id)}
-                              className={`w-full text-left px-2 py-1.5 rounded text-xs truncate transition-colors ${
-                                cardId === c.id
-                                  ? 'bg-sky-500/15 text-sky-200'
-                                  : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
-                              }`}
+                              onClick={() => createCard(ct, c.id)}
+                              className="ml-2 mt-0.5 mb-1 text-[10px] text-slate-600 hover:text-sky-400"
                             >
-                              {c.status === 'locked' && <span className="text-emerald-400 mr-1">●</span>}
-                              {c.title || `İsimsiz ${schemas[c.type].label}`}
+                              + {schemas[ct].label} ekle
                             </button>
-                            {ct && (
-                              <button
-                                onClick={() => createCard(ct, c.id)}
-                                className="ml-2 mt-0.5 mb-1 text-[10px] text-slate-600 hover:text-sky-400"
-                              >
-                                + {schemas[ct].label} ekle
-                              </button>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )
-                })}
-              </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              })}
 
               {cards.length === 0 && (
                 <button className="btn-ghost w-full text-xs" onClick={() => createCard('planet', null)}>
@@ -364,6 +402,7 @@ function Studio({ session }: { session: Session }) {
           {card ? (
             <CardWorkspace
               card={card}
+              messages={messages}
               ancestors={ancestors}
               busy={busy}
               error={error}

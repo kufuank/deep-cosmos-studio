@@ -1,36 +1,38 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSettings } from '../lib/settings'
 import { MODELS } from '../lib/anthropic'
+import { loadAgentConfig } from '../agents/config'
+import { cardOrder, schemas } from '../schemas'
+import type { CardType } from '../schemas'
 
 export function Settings({ onClose }: { onClose: () => void }) {
-  const { apiKey, model, setApiKey, setModel } = useSettings()
-  const [draft, setDraft] = useState(apiKey)
+  const { model, setModel } = useSettings()
+  const [versions, setVersions] = useState<Record<string, string> | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    void (async () => {
+      const entries = await Promise.all(
+        cardOrder.map(async (t: CardType) => {
+          const c = await loadAgentConfig(t)
+          return [t, c.fallback ? 'yerel kopya' : `v${c.version}`] as const
+        }),
+      )
+      if (alive) setVersions(Object.fromEntries(entries))
+    })()
+    return () => {
+      alive = false
+    }
+  }, [])
 
   return (
     <div
       className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-6"
       onClick={onClose}
     >
-      <div className="card w-full max-w-md p-5 space-y-4" onClick={(e) => e.stopPropagation()}>
+      <div className="card w-full max-w-md p-5 space-y-5" onClick={(e) => e.stopPropagation()}>
         <div>
           <h2 className="text-base font-semibold text-slate-100">Ayarlar</h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Anahtar yalnızca bu tarayıcıda saklanır, sunucuya gönderilmez.
-          </p>
-        </div>
-
-        <div>
-          <label className="label">Anthropic API anahtarı</label>
-          <input
-            className="input font-mono text-xs"
-            type="password"
-            placeholder="sk-ant-…"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-          />
-          <p className="mt-1 text-[11px] text-slate-600">
-            console.anthropic.com → API Keys üzerinden alabilirsiniz.
-          </p>
         </div>
 
         <div>
@@ -44,18 +46,36 @@ export function Settings({ onClose }: { onClose: () => void }) {
           </select>
         </div>
 
-        <div className="flex justify-end gap-2 pt-1">
-          <button className="btn-ghost" onClick={onClose}>
+        <div>
+          <label className="label">Protokol sürümleri</label>
+          <div className="rounded-md border border-edge divide-y divide-edge">
+            {cardOrder.map((t) => (
+              <div key={t} className="flex items-center justify-between px-3 py-1.5">
+                <span className="text-xs text-slate-400">{schemas[t].label}</span>
+                <span className="text-xs text-slate-500 nums">
+                  {versions ? versions[t] : '…'}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-1 text-[11px] text-slate-600">
+            Protokoller veritabanında tutulur. “yerel kopya”, veritabanına ulaşılamadığında
+            kaynak dokümanlardan aktarılan yedeğin kullanıldığı anlamına gelir.
+          </p>
+        </div>
+
+        <div>
+          <label className="label">API anahtarı</label>
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Anahtar sunucuda tutuluyor, tarayıcınızda saklanmıyor. Değiştirmek için Supabase
+            panelinden <code className="text-slate-400">ANTHROPIC_API_KEY</code> secret’ını
+            güncelleyin.
+          </p>
+        </div>
+
+        <div className="flex justify-end pt-1">
+          <button className="btn-primary" onClick={onClose}>
             Kapat
-          </button>
-          <button
-            className="btn-primary"
-            onClick={() => {
-              setApiKey(draft.trim())
-              onClose()
-            }}
-          >
-            Kaydet
           </button>
         </div>
       </div>

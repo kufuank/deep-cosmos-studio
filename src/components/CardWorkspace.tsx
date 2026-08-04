@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { schemas, fieldStats } from '../schemas'
 import type { CardFields, CardType } from '../schemas'
-import type { CardRow } from '../lib/supabase'
+import type { CardRow, MessageRow } from '../lib/supabase'
 import { FieldGrid } from './FieldGrid'
 import { ChatPanel } from './ChatPanel'
 import { PromptPanel } from './PromptPanel'
@@ -10,6 +10,7 @@ type Pane = 'chat' | 'fields' | 'prompts'
 
 export function CardWorkspace({
   card,
+  messages,
   ancestors,
   busy,
   error,
@@ -19,6 +20,7 @@ export function CardWorkspace({
   onToggleLock,
 }: {
   card: CardRow
+  messages: MessageRow[]
   ancestors: Partial<Record<CardType, CardFields>>
   busy: boolean
   error: string | null
@@ -95,7 +97,7 @@ export function CardWorkspace({
         <div className={`h-full min-h-0 ${pane === 'chat' ? 'block' : 'hidden'} xl:block`}>
           <ChatPanel
             type={card.type}
-            chat={card.chat}
+            chat={messages}
             busy={busy}
             error={error}
             locked={locked}

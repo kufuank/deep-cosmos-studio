@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ChatEntry } from '../lib/supabase'
+import type { MessageRow } from '../lib/supabase'
 import { OPENING_HINT } from '../agents/instructions'
 import type { CardType } from '../schemas'
 
@@ -12,7 +12,7 @@ export function ChatPanel({
   onSend,
 }: {
   type: CardType
-  chat: ChatEntry[]
+  chat: MessageRow[]
   busy: boolean
   error: string | null
   locked: boolean

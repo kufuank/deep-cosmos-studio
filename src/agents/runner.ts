@@ -2,7 +2,8 @@ import { callAnthropic } from '../lib/anthropic'
 import type { ApiMessage, ContentBlock, ToolDef } from '../lib/anthropic'
 import { schemas, cardOrder, allFields } from '../schemas'
 import type { CardFields, CardType, FieldValue } from '../schemas'
-import { agentInstructions, protocolText } from './instructions'
+import { loadAgentConfig } from './config'
+import type { AgentConfig } from './config'
 
 export interface FieldUpdate {
   key: string
@@ -101,13 +102,9 @@ export function buildSystemPrompt(
   type: CardType,
   fields: CardFields,
   ancestors: Partial<Record<CardType, CardFields>>,
+  config: AgentConfig,
 ): string {
-  const inst = agentInstructions[type]
-  const parts = [
-    inst.role,
-    `CORE KNOWLEDGE\n${inst.knowledge}`,
-    protocolText(type),
-  ]
+  const parts = [config.role, `CORE KNOWLEDGE\n${config.knowledge}`, config.protocol]
 
   const anc = ancestorBlock(type, ancestors)
   if (anc) {
@@ -128,7 +125,6 @@ export function buildSystemPrompt(
  * final text. Returns the chat text plus every field update it made.
  */
 export async function runAgentTurn(params: {
-  apiKey: string
   model: string
   type: CardType
   fields: CardFields
@@ -137,7 +133,8 @@ export async function runAgentTurn(params: {
   userMessage: string
   signal?: AbortSignal
 }): Promise<AgentTurnResult> {
-  const system = buildSystemPrompt(params.type, params.fields, params.ancestors)
+  const config = await loadAgentConfig(params.type)
+  const system = buildSystemPrompt(params.type, params.fields, params.ancestors, config)
   const validKeys = new Set(allFields(schemas[params.type]).map((f) => f.key))
 
   const messages: ApiMessage[] = [
@@ -153,7 +150,6 @@ export async function runAgentTurn(params: {
   // so a misbehaving turn cannot spin.
   for (let i = 0; i < 6; i++) {
     const res = await callAnthropic({
-      apiKey: params.apiKey,
       model: params.model,
       system,
       messages,

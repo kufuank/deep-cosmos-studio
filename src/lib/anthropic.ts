@@ -1,13 +1,11 @@
-/**
- * Minimal Anthropic Messages API client for the browser.
- *
- * The key is supplied by the operator and stored locally — this app has no
- * server, so requests go straight from the page to api.anthropic.com. That
- * requires the explicit browser-access opt-in header.
- */
+import { supabase } from './supabase'
 
-const API_URL = 'https://api.anthropic.com/v1/messages'
-const API_VERSION = '2023-06-01'
+/**
+ * Calls Anthropic through the `anthropic` edge function.
+ *
+ * The key lives on the server. This page is a public static site, so it only
+ * ever forwards the caller's own Supabase session token.
+ */
 
 export const MODELS = [
   { id: 'claude-sonnet-5', label: 'Sonnet 5 — hızlı, günlük kullanım' },
@@ -31,7 +29,6 @@ export interface ApiMessage {
 }
 
 export interface CallOptions {
-  apiKey: string
   model: string
   system: string
   messages: ApiMessage[]
@@ -55,16 +52,26 @@ export class AnthropicError extends Error {
   }
 }
 
+function functionUrl(): string {
+  const base =
+    import.meta.env.VITE_SUPABASE_URL ?? 'https://fypbcazbdjtcrhkkfrtr.supabase.co'
+  return `${base}/functions/v1/anthropic`
+}
+
 export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
+  const { data } = await supabase.auth.getSession()
+  const token = data.session?.access_token
+  if (!token) {
+    throw new AnthropicError('Oturum bulunamadı. Lütfen tekrar giriş yapın.', 401)
+  }
+
   let res: Response
   try {
-    res = await fetch(API_URL, {
+    res = await fetch(functionUrl(), {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-api-key': opts.apiKey,
-        'anthropic-version': API_VERSION,
-        'anthropic-dangerous-direct-browser-access': 'true',
+        authorization: `Bearer ${token}`,
       },
       signal: opts.signal,
       body: JSON.stringify({
@@ -77,28 +84,26 @@ export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw e
-    throw new AnthropicError(
-      'Anthropic API\'ye ulaşılamadı. İnternet bağlantınızı kontrol edin.',
-    )
+    throw new AnthropicError('Sunucuya ulaşılamadı. İnternet bağlantınızı kontrol edin.')
   }
 
   if (!res.ok) {
     let detail = ''
     try {
-      const body = (await res.json()) as { error?: { message?: string } }
-      detail = body.error?.message ?? ''
+      const body = (await res.json()) as { error?: string | { message?: string } }
+      detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '')
     } catch {
-      detail = await res.text().catch(() => '')
+      detail = ''
     }
     if (res.status === 401) {
-      throw new AnthropicError('API anahtarı geçersiz. Ayarlardan kontrol edin.', 401)
+      throw new AnthropicError(detail || 'Oturumunuz sona ermiş. Tekrar giriş yapın.', 401)
     }
     if (res.status === 429) {
       throw new AnthropicError('Hız sınırına takıldınız. Biraz bekleyip tekrar deneyin.', 429)
     }
-    throw new AnthropicError(detail || `Anthropic API hatası (${res.status})`, res.status)
+    throw new AnthropicError(detail || `Sunucu hatası (${res.status})`, res.status)
   }
 
-  const data = (await res.json()) as { content: ContentBlock[]; stop_reason: string | null }
-  return { content: data.content ?? [], stopReason: data.stop_reason }
+  const body = (await res.json()) as { content: ContentBlock[]; stop_reason: string | null }
+  return { content: body.content ?? [], stopReason: body.stop_reason }
 }
