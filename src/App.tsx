@@ -61,6 +61,8 @@ function Studio({ session }: { session: Session }) {
   const [cardId, setCardId] = useState<string | null>(null)
   const [messages, setMessages] = useState<MessageRow[]>([])
   const [busy, setBusy] = useState(false)
+  const [streamText, setStreamText] = useState('')
+  const [status, setStatus] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -214,6 +216,8 @@ function Studio({ session }: { session: Session }) {
     if (!card) return
     setError(null)
     setBusy(true)
+    setStreamText('')
+    setStatus('Ajan düşünüyor')
 
     const optimistic: MessageRow = {
       id: `tmp-${Date.now()}`,
@@ -238,6 +242,8 @@ function Studio({ session }: { session: Session }) {
         ancestors,
         history,
         userMessage: text,
+        onText: (d) => setStreamText((t) => t + d),
+        onStatus: setStatus,
       })
 
       const nextFields = applyUpdates(card.fields, res.updates)
@@ -275,6 +281,8 @@ function Studio({ session }: { session: Session }) {
       setMessages((m) => m.filter((x) => x.id !== optimistic.id))
     } finally {
       setBusy(false)
+      setStreamText('')
+      setStatus(null)
     }
   }
 
@@ -438,6 +446,8 @@ function Studio({ session }: { session: Session }) {
               messages={messages}
               ancestors={ancestors}
               busy={busy}
+              streamText={streamText}
+              status={status}
               error={error}
               saving={saving}
               onFieldChange={onFieldChange}

@@ -7,6 +7,8 @@ export function ChatPanel({
   type,
   chat,
   busy,
+  streamText,
+  status,
   error,
   locked,
   onSend,
@@ -14,6 +16,8 @@ export function ChatPanel({
   type: CardType
   chat: MessageRow[]
   busy: boolean
+  streamText: string
+  status: string | null
   error: string | null
   locked: boolean
   onSend: (text: string) => void
@@ -23,7 +27,7 @@ export function ChatPanel({
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chat.length, busy])
+  }, [chat.length, busy, streamText])
 
   function submit() {
     const t = draft.trim()
@@ -65,8 +69,24 @@ export function ChatPanel({
           </div>
         ))}
 
+        {/* Live output. A turn can run past a minute, so the partial answer and a
+            coarse status keep it visible that work is happening. */}
         {busy && (
-          <p className="text-sm text-slate-500 animate-pulse">Ajan düşünüyor…</p>
+          <div className="space-y-2">
+            {streamText && (
+              <p className="text-sm text-slate-200 whitespace-pre-wrap leading-relaxed">
+                {streamText}
+                <span className="inline-block w-1.5 h-4 ml-0.5 -mb-0.5 bg-sky-400 animate-pulse" />
+              </p>
+            )}
+            <p className="text-xs text-slate-500 flex items-center gap-2">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-sky-400 animate-pulse" />
+              {status ?? 'Ajan düşünüyor'}…
+              {!streamText && (
+                <span className="text-slate-600">bu adım bir dakikayı bulabilir</span>
+              )}
+            </p>
+          </div>
         )}
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">

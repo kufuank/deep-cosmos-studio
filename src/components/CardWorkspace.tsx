@@ -13,6 +13,8 @@ export function CardWorkspace({
   messages,
   ancestors,
   busy,
+  streamText,
+  status,
   error,
   saving,
   onFieldChange,
@@ -23,6 +25,8 @@ export function CardWorkspace({
   messages: MessageRow[]
   ancestors: Partial<Record<CardType, CardFields>>
   busy: boolean
+  streamText: string
+  status: string | null
   error: string | null
   saving: boolean
   onFieldChange: (key: string, value: string) => void
@@ -99,6 +103,8 @@ export function CardWorkspace({
             type={card.type}
             chat={messages}
             busy={busy}
+            streamText={streamText}
+            status={status}
             error={error}
             locked={locked}
             onSend={onSend}

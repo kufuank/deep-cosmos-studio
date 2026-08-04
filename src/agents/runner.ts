@@ -1,4 +1,4 @@
-import { callAnthropic } from '../lib/anthropic'
+import { streamAnthropic } from '../lib/anthropic'
 import type { ApiMessage, ContentBlock, ToolDef } from '../lib/anthropic'
 import { schemas, cardOrder, allFields } from '../schemas'
 import type { CardFields, CardType, FieldValue } from '../schemas'
@@ -132,6 +132,10 @@ export async function runAgentTurn(params: {
   history: ApiMessage[]
   userMessage: string
   signal?: AbortSignal
+  /** Assistant prose as it streams in. */
+  onText?: (delta: string) => void
+  /** Coarse status for the UI: the model is writing fields, or answering. */
+  onStatus?: (status: string) => void
 }): Promise<AgentTurnResult> {
   const config = await loadAgentConfig(params.type)
   const system = buildSystemPrompt(params.type, params.fields, params.ancestors, config)
@@ -149,12 +153,15 @@ export async function runAgentTurn(params: {
   // The model may call set_fields several times before answering; cap the loop
   // so a misbehaving turn cannot spin.
   for (let i = 0; i < 6; i++) {
-    const res = await callAnthropic({
+    params.onStatus?.(i === 0 ? 'Ajan düşünüyor' : 'Ajan devam ediyor')
+    const res = await streamAnthropic({
       model: params.model,
       system,
       messages,
       tools: [setFieldsTool],
       signal: params.signal,
+      onText: params.onText,
+      onToolStart: () => params.onStatus?.('Alanlar yazılıyor'),
     })
 
     const assistantMsg: ApiMessage = { role: 'assistant', content: res.content }

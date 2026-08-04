@@ -10,6 +10,7 @@ import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
 import { formatTimecode, dataUrlParts } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
+import { createStreamAccumulator } from '../src/lib/anthropic'
 
 /** Stands in for the database-backed config, using the transcribed constants. */
 function cfg(type: CardType): AgentConfig {
@@ -197,6 +198,96 @@ check(
   'audio field states it cannot be determined',
   JSON.stringify(recordShotTool.input_schema).includes('Cannot be determined'),
 )
+
+console.log('\n== stream accumulator ==')
+{
+  // A realistic turn: prose, then a batched set_fields tool call.
+  const events = [
+    { type: 'message_start', message: { id: 'm1' } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Merhaba, ' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'gezegeni kuruyorum.' } },
+    { type: 'content_block_stop', index: 0 },
+    {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'tool_use', id: 'tu_1', name: 'set_fields' },
+    },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"updates":[{"key":"planet_' } },
+    { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: 'name","value":"Vesper","state":"confirmed"}]}' } },
+    { type: 'content_block_stop', index: 1 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+    { type: 'message_stop' },
+  ]
+  const wire = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('')
+
+  // Feed it in awkward slices so event boundaries land mid-chunk.
+  const text: string[] = []
+  const tools: string[] = []
+  const acc = createStreamAccumulator({
+    onText: (d) => text.push(d),
+    onToolStart: (n) => tools.push(n),
+  })
+  for (let i = 0; i < wire.length; i += 7) acc.push(wire.slice(i, i + 7))
+  const result = acc.finish()
+
+  check('text streamed in order', text.join('') === 'Merhaba, gezegeni kuruyorum.', text.join(''))
+  check('tool start reported', tools.join(',') === 'set_fields', tools.join(','))
+  check('two blocks rebuilt', result.content.length === 2, String(result.content.length))
+  const textBlock = result.content.find((b) => b.type === 'text')
+  check(
+    'text block complete',
+    textBlock?.type === 'text' && textBlock.text === 'Merhaba, gezegeni kuruyorum.',
+  )
+  const toolBlock = result.content.find((b) => b.type === 'tool_use')
+  const input = toolBlock?.type === 'tool_use' ? (toolBlock.input as any) : null
+  check('fragmented tool JSON reassembled', input?.updates?.[0]?.key === 'planet_name', JSON.stringify(input))
+  check('tool value survived the split', input?.updates?.[0]?.value === 'Vesper')
+  check('stop reason captured', result.stopReason === 'end_turn', String(result.stopReason))
+}
+
+{
+  // A truncated tool call must not be applied half-written.
+  const acc = createStreamAccumulator()
+  acc.push(
+    'data: ' +
+      JSON.stringify({
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'tool_use', id: 't', name: 'set_fields' },
+      }) +
+      '\n\n',
+  )
+  acc.push(
+    'data: ' +
+      JSON.stringify({
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'input_json_delta', partial_json: '{"updates":[{"key":"mass"' },
+      }) +
+      '\n\n',
+  )
+  acc.push('data: ' + JSON.stringify({ type: 'content_block_stop', index: 0 }) + '\n\n')
+  const r = acc.finish()
+  const b = r.content[0]
+  check(
+    'truncated tool input becomes empty, not partial',
+    b?.type === 'tool_use' && JSON.stringify(b.input) === '{}',
+    JSON.stringify(b),
+  )
+}
+
+{
+  // Garbage on the wire should be skipped, not fatal.
+  const acc = createStreamAccumulator()
+  acc.push('data: not-json\n\n')
+  acc.push(': a comment line\n\n')
+  acc.push('data: ' + JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }) + '\n\n')
+  acc.push('data: ' + JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } }) + '\n\n')
+  const r = acc.finish()
+  const b = r.content[0]
+  check('malformed events skipped', b?.type === 'text' && b.text === 'ok', JSON.stringify(b))
+}
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)
 process.exit(failures === 0 ? 0 : 1)

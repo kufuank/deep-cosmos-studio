@@ -97,6 +97,7 @@ Deno.serve(async (req: Request) => {
     messages?: unknown[]
     tools?: unknown[]
     max_tokens?: number
+    stream?: boolean
   }
   try {
     payload = await req.json()
@@ -112,12 +113,14 @@ Deno.serve(async (req: Request) => {
     return json({ error: 'messages alanı zorunlu.' }, 400, origin)
   }
 
+  const stream = payload.stream === true
   const body = {
     model,
     max_tokens: Math.min(payload.max_tokens ?? 8000, MAX_TOKENS_CAP),
     system: payload.system ?? '',
     messages: payload.messages,
     ...(Array.isArray(payload.tools) && payload.tools.length ? { tools: payload.tools } : {}),
+    ...(stream ? { stream: true } : {}),
   }
 
   let upstream: Response
@@ -133,6 +136,21 @@ Deno.serve(async (req: Request) => {
     })
   } catch {
     return json({ error: 'Anthropic API\'ye ulaşılamadı.' }, 502, origin)
+  }
+
+  // Streaming responses are piped straight through. A full turn can take well
+  // over a minute, so the client needs tokens as they are produced rather than
+  // a single blocking response.
+  if (stream && upstream.ok && upstream.body) {
+    return new Response(upstream.body, {
+      status: 200,
+      headers: {
+        ...corsHeaders(origin),
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      },
+    })
   }
 
   const text = await upstream.text()
