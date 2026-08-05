@@ -7,7 +7,7 @@ import type { CardFields, CardType } from './schemas'
 import { runAgentTurn, applyUpdates } from './agents/runner'
 import { clearAgentConfigCache } from './agents/config'
 import { useSettings } from './lib/settings'
-import { AnthropicError } from './lib/anthropic'
+import { describeError } from './lib/errors'
 import { Auth } from './components/Auth'
 import { Settings } from './components/Settings'
 import { CardWorkspace } from './components/CardWorkspace'
@@ -255,8 +255,11 @@ function Studio({ session }: { session: Session }) {
 
       const { data, error } = await supabase
         .from('dc_messages')
+        // Every row must carry the same keys: in a multi-row insert PostgREST
+        // builds one column list from the union of the objects and writes NULL
+        // for any key a row omits, which a NOT NULL column then rejects.
         .insert([
-          { card_id: card.id, owner: session.user.id, role: 'user', text },
+          { card_id: card.id, owner: session.user.id, role: 'user', text, wrote: [] },
           {
             card_id: card.id,
             owner: session.user.id,
@@ -271,13 +274,7 @@ function Studio({ session }: { session: Session }) {
       // Swap the optimistic bubble for the persisted rows.
       setMessages((m) => [...m.filter((x) => x.id !== optimistic.id), ...((data ?? []) as MessageRow[])])
     } catch (e) {
-      setError(
-        e instanceof AnthropicError
-          ? e.message
-          : e instanceof Error
-            ? e.message
-            : 'Beklenmeyen bir hata oluştu.',
-      )
+      setError(describeError(e))
       setMessages((m) => m.filter((x) => x.id !== optimistic.id))
     } finally {
       setBusy(false)

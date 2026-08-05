@@ -6,6 +6,7 @@ import { detectShots, formatTimecode, loadVideo } from '../lib/video'
 import type { DetectedShot } from '../lib/video'
 import { analyseShot, shotSummary } from '../agents/deconstruct'
 import { useSettings } from '../lib/settings'
+import { describeError, isAbort } from '../lib/errors'
 import { ShotTable } from './ShotTable'
 
 interface Progress {
@@ -159,8 +160,8 @@ export function ShotLibrary({ session }: { session: Session }) {
       )
       setProgress(null)
     } catch (e) {
-      const aborted = e instanceof DOMException && e.name === 'AbortError'
-      const msg = aborted ? 'Çözümleme durduruldu.' : e instanceof Error ? e.message : 'Bilinmeyen hata.'
+      const aborted = isAbort(e)
+      const msg = aborted ? 'Çözümleme durduruldu.' : describeError(e)
       setError(msg)
       setProgress(null)
       if (listId) {

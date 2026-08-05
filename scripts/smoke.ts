@@ -11,6 +11,7 @@ import type { AgentConfig } from '../src/agents/config'
 import { formatTimecode, dataUrlParts } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
 import { createStreamAccumulator } from '../src/lib/anthropic'
+import { describeError, isAbort } from '../src/lib/errors'
 
 /** Stands in for the database-backed config, using the transcribed constants. */
 function cfg(type: CardType): AgentConfig {
@@ -287,6 +288,46 @@ console.log('\n== stream accumulator ==')
   const r = acc.finish()
   const b = r.content[0]
   check('malformed events skipped', b?.type === 'text' && b.text === 'ok', JSON.stringify(b))
+}
+
+console.log('\n== error reporting ==')
+// Supabase returns plain objects, not Errors. Collapsing those into a generic
+// message once hid a NOT NULL violation for a whole debugging cycle.
+check('Error instance', describeError(new Error('boom')) === 'boom')
+check(
+  'postgrest-shaped object surfaces its message',
+  describeError({ message: 'null value in column "wrote"', code: '23502' }).startsWith(
+    'null value in column "wrote"',
+  ),
+  describeError({ message: 'null value in column "wrote"', code: '23502' }),
+)
+check(
+  'code is carried through',
+  describeError({ message: 'x', code: '23502' }).includes('23502'),
+)
+check('falls back on details', describeError({ details: 'detay' }) === 'detay')
+check('plain string', describeError('düz metin') === 'düz metin')
+check(
+  'truly unknown still has a message',
+  describeError(undefined) === 'Beklenmeyen bir hata oluştu.',
+)
+check('abort detected', isAbort(new DOMException('x', 'AbortError')))
+check('ordinary error is not an abort', !isAbort(new Error('x')))
+
+console.log('\n== multi-row insert shape ==')
+// Guards the PostgREST footgun: in a multi-row insert the column list is the
+// union of the objects, and any key a row omits is written as NULL.
+{
+  const rows = [
+    { card_id: 'c', owner: 'o', role: 'user', text: 'hi', wrote: [] },
+    { card_id: 'c', owner: 'o', role: 'assistant', text: 'yo', wrote: ['planet_name'] },
+  ]
+  const keys = rows.map((r) => Object.keys(r).sort().join(','))
+  check('every row declares the same columns', new Set(keys).size === 1, keys.join(' | '))
+  check(
+    'no row omits a NOT NULL column',
+    rows.every((r) => Array.isArray(r.wrote)),
+  )
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)
