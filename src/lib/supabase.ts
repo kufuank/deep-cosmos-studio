@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import type { CardFields, CardType } from '../schemas'
+import type { CardFields, CardType, Scene } from '../schemas'
 
 /**
  * Publishable key only — every table is protected by row level security keyed on
@@ -30,6 +30,9 @@ export interface CardRow {
   parent_id: string | null
   title: string
   fields: CardFields
+  /** Storyboard only: the ordered scene list and the shot list it adapts. */
+  scenes: Scene[]
+  shot_list_id: string | null
   status: 'draft' | 'locked'
   locked_at: string | null
   created_at: string

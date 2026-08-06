@@ -1,5 +1,5 @@
 import { schemas, cardOrder, allFields } from '../schemas'
-import type { CardFields, CardSchema, CardType } from '../schemas'
+import type { CardFields, CardSchema, CardType, Scene } from '../schemas'
 
 export type PromptKind = 'sheet' | 'still' | 'video'
 
@@ -19,6 +19,8 @@ export interface PromptContext {
   fields: CardFields
   /** Ancestor cards keyed by type, nearest first is irrelevant — lookup by type. */
   ancestors: Partial<Record<CardType, CardFields>>
+  /** Storyboard only. */
+  scenes?: Scene[]
 }
 
 function val(fields: CardFields | undefined, key: string): string {
@@ -169,10 +171,15 @@ function subjectSummary(ctx: PromptContext): string {
         'weather_patterns',
         'visual_identity',
       ])
+    default:
+      return ''
   }
 }
 
-const STILL_FRAMING: Record<CardType, string> = {
+/** The four identity sheets; the storyboard builds its prompts separately. */
+type SheetType = Exclude<CardType, 'storyboard'>
+
+const STILL_FRAMING: Record<SheetType, string> = {
   planet:
     'Single ultra-photorealistic astronomical still of the planet seen from orbit. Long lens, no lens flare theatrics, physically correct terminator line and atmospheric limb.',
   ecosystem:
@@ -183,7 +190,7 @@ const STILL_FRAMING: Record<CardType, string> = {
     'Single ultra-photorealistic wide establishing still of the location. Natural documentary framing, physically correct atmospheric perspective.',
 }
 
-const VIDEO_ACTION: Record<CardType, string> = {
+const VIDEO_ACTION: Record<SheetType, string> = {
   planet:
     'Extremely slow orbital drift across the planet, terminator line advancing naturally. No cuts. No camera acrobatics.',
   ecosystem:
@@ -206,7 +213,7 @@ Foreground sounds dominate nearby events; distant environmental ambience stays s
 function buildStill(ctx: PromptContext): BuiltPrompt {
   const schema = schemas[ctx.type]
   const parts: string[] = [
-    `Ultra-photorealistic single-frame still from a fictional nature documentary. ${STILL_FRAMING[ctx.type]}`,
+    `Ultra-photorealistic single-frame still from a fictional nature documentary. ${STILL_FRAMING[ctx.type as SheetType]}`,
     WORLD_RULES,
   ]
 
@@ -250,7 +257,7 @@ function buildVideo(ctx: PromptContext): BuiltPrompt {
   const subject = subjectSummary(ctx)
   if (subject) parts.push(`SUBJECT\n${subject}`)
 
-  parts.push(`ACTION\n${VIDEO_ACTION[ctx.type]}`)
+  parts.push(`ACTION\n${VIDEO_ACTION[ctx.type as SheetType]}`)
 
   parts.push(`CAMERA
 Professional wildlife documentary cinematography.
@@ -279,6 +286,132 @@ Every movement must emerge naturally from the organism's biology and environment
   }
 }
 
+/** The shared header every storyboard-derived prompt opens with. */
+function storyboardCommon(ctx: PromptContext): string {
+  const f = (k: string) => val(ctx.fields, k)
+  const lines = [
+    f('common_camera') && `COMMON CAMERA CHARACTERISTICS\n${f('common_camera')}`,
+    f('common_lighting') && `COMMON LIGHTING & COLOR\n${f('common_lighting')}`,
+    f('common_environment') && `COMMON ENVIRONMENT\n${f('common_environment')}`,
+    f('common_style') && `COMMON STYLE / TONE\n${f('common_style')}`,
+  ].filter(Boolean)
+  return lines.join('\n\n')
+}
+
+/** One scene rendered as a standalone, production-ready video prompt. */
+export function sceneVideoPrompt(ctx: PromptContext, scene: Scene): string {
+  const parts = [
+    `Generate an ultra-photorealistic fictional AI-generated nature documentary shot. Live-action. Single continuous take, ${scene.timestamp_start} – ${scene.timestamp_end}.`,
+    WORLD_RULES,
+  ]
+  const inherited = inheritedBlock(ctx)
+  if (inherited) parts.push(inherited)
+
+  const common = storyboardCommon(ctx)
+  if (common) parts.push(common)
+
+  parts.push(`SHOT
+Shot Type: ${scene.shot_type}
+Camera Angle: ${scene.camera_angle}
+Camera Movement: ${scene.camera_movement}
+
+ACTION
+${scene.visual_prompt}`)
+
+  parts.push(`AUDIO
+${scene.audio}
+
+No music. No soundtrack. No score.
+No narration. No voice-over. No subtitles.
+Every sound must originate naturally from the environment visible within the frame.`)
+  return parts.join('\n\n')
+}
+
+function buildStoryboardPrompts(ctx: PromptContext): BuiltPrompt[] {
+  const scenes = ctx.scenes ?? []
+  const schema = schemas.storyboard
+  const missing = missingFields(schema, ctx.fields)
+  if (!scenes.length) missing.unshift('Sahneler')
+
+  const inherited = inheritedBlock(ctx)
+  const common = storyboardCommon(ctx)
+  const planet = val(ctx.ancestors.planet, 'planet_name') || '[Planet]'
+  const species = val(ctx.ancestors.species, 'species_name') || '[Species]'
+  const location = val(ctx.ancestors.location, 'location_name') || '[Location]'
+
+  // The board itself: one image containing every frame.
+  const board = [
+    `Create a premium AAA ecosystem storyboard image for an ultra-photorealistic fictional nature documentary filmed on ${planet}, capturing ${species} during its natural life inside ${location}.`,
+    schema.directive,
+    WORLD_RULES,
+    inherited,
+    common,
+    `Compose the storyboard as a 16:9 production board containing ${scenes.length || '[N]'} storyboard frames.
+Each frame represents one scene and contains a vertical 9:16 preview image.
+Below every frame include the timestamp and the scene description.`,
+    scenes
+      .map(
+        (s, i) =>
+          `FRAME ${String(i + 1).padStart(2, '0')} — ${s.timestamp_start}–${s.timestamp_end}\n${s.scene_description}`,
+      )
+      .join('\n\n'),
+    schema.promptTail,
+  ]
+    .filter(Boolean)
+    .join('\n\n────────────────────\n\n')
+
+  // The whole sequence as one video brief.
+  const sequence = [
+    `Generate an ultra-photorealistic fictional AI-generated nature documentary sequence filmed entirely on ${planet}, observing ${species} naturally within ${location}.`,
+    WORLD_RULES,
+    inherited,
+    common,
+    scenes
+      .map(
+        (s, i) =>
+          `SCENE ${String(i + 1).padStart(2, '0')}\nTimestamp: ${s.timestamp_start} – ${s.timestamp_end}\nShot: ${s.shot_type} | ${s.camera_angle} | ${s.camera_movement}\nVideo Prompt: ${s.visual_prompt}\nAudio: ${s.audio}`,
+      )
+      .join('\n\n'),
+    `The sequence must preserve scene order, timestamps, pacing, framing, camera language and documentary rhythm exactly as written above.
+Ultra-photorealistic live-action. Professional BBC / National Geographic style wildlife cinematography.
+No staged actions. No cinematic exaggeration. No fantasy aesthetics.`,
+    AUDIO_BLOCK,
+  ]
+    .filter(Boolean)
+    .join('\n\n────────────────────\n\n')
+
+  // Narration is kept apart on purpose: the video prompt forbids voice-over, so
+  // it belongs in a separate voice pass rather than in the generation prompt.
+  const narration = scenes
+    .map((s, i) => `${String(i + 1).padStart(2, '0')}  ${s.timestamp_start}–${s.timestamp_end}\n${s.voice_over}`)
+    .join('\n\n')
+
+  return [
+    {
+      kind: 'sheet',
+      title: 'Storyboard Panosu — final prompt',
+      note: 'Tüm kareleri içeren 16:9 pano görseli. Görsel modeline yapıştırın.',
+      text: board,
+      missing,
+    },
+    {
+      kind: 'still',
+      title: 'Anlatım Metni — sahne sahne',
+      note: 'Video promptu anlatımı yasaklar; bu metin ayrı bir seslendirme katmanı içindir.',
+      text: narration || '(Henüz sahne yok.)',
+      missing,
+    },
+    {
+      kind: 'video',
+      title: 'Sekans — final video prompt',
+      note: 'Tüm sekans tek brief olarak. Sahne bazlı promptlar için sahne tablosundaki kopyala düğmelerini kullanın.',
+      text: sequence,
+      missing,
+    },
+  ]
+}
+
 export function buildPrompts(ctx: PromptContext): BuiltPrompt[] {
+  if (ctx.type === 'storyboard') return buildStoryboardPrompts(ctx)
   return [buildSheet(ctx), buildStill(ctx), buildVideo(ctx)]
 }

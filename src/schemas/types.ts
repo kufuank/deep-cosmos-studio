@@ -1,4 +1,4 @@
-export type CardType = 'planet' | 'ecosystem' | 'species' | 'location'
+export type CardType = 'planet' | 'ecosystem' | 'species' | 'location' | 'storyboard'
 
 /** Lifecycle of a single field inside a card. */
 export type FieldState =

@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
-import type { CardRow, MessageRow, ProposalRow, WorldRow } from './lib/supabase'
+import type { CardRow, MessageRow, ProposalRow, ShotListRow, ShotRow, WorldRow } from './lib/supabase'
 import { cardOrder, schemas } from './schemas'
-import type { CardFields, CardType } from './schemas'
+import type { CardFields, CardType, Scene } from './schemas'
 import { runAgentTurn, applyUpdates } from './agents/runner'
 import { clearAgentConfigCache } from './agents/config'
 import { useSettings } from './lib/settings'
@@ -27,6 +27,7 @@ const TITLE_KEY: Record<CardType, string> = {
   ecosystem: 'ecosystem_name',
   species: 'species_name',
   location: 'location_name',
+  storyboard: 'storyboard_title',
 }
 
 export default function App() {
@@ -71,6 +72,7 @@ function Studio({ session }: { session: Session }) {
   const [view, setView] = useState<View>('worlds')
 
   const [proposals, setProposals] = useState<ProposalRow[]>([])
+  const [shotLists, setShotLists] = useState<ShotListRow[]>([])
   const saveTimer = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
 
   const loadProposals = useCallback(async () => {
@@ -85,6 +87,16 @@ function Studio({ session }: { session: Session }) {
   useEffect(() => {
     void loadProposals()
   }, [loadProposals])
+
+  useEffect(() => {
+    void (async () => {
+      const { data } = await supabase
+        .from('dc_shot_lists')
+        .select('*')
+        .order('created_at', { ascending: false })
+      setShotLists((data ?? []) as ShotListRow[])
+    })()
+  }, [])
 
   async function decideProposal(p: ProposalRow, approve: boolean) {
     if (approve) {
@@ -272,6 +284,19 @@ function Studio({ session }: { session: Session }) {
     persistCard(card.id, { fields: nextFields, title })
   }
 
+  function onSceneChange(index: number, patch: Partial<Scene>) {
+    if (!card) return
+    const next = (card.scenes ?? []).map((s, i) => (i === index ? { ...s, ...patch } : s))
+    updateCardLocal(card.id, (c) => ({ ...c, scenes: next }))
+    persistCard(card.id, { scenes: next })
+  }
+
+  function onShotListChange(id: string | null) {
+    if (!card) return
+    updateCardLocal(card.id, (c) => ({ ...c, shot_list_id: id }))
+    persistCard(card.id, { shot_list_id: id }, true)
+  }
+
   async function onSend(text: string) {
     if (!card) return
     setError(null)
@@ -295,10 +320,24 @@ function Studio({ session }: { session: Session }) {
       // full current sheet state, so tool blocks need not persist.
       const history = messages.map((m) => ({ role: m.role, content: m.text }))
 
+      // The storyboard adapts a real, measured sequence; without the shot list
+      // it would have nothing to preserve and would start inventing shots.
+      let shots: ShotRow[] = []
+      if (card.type === 'storyboard' && card.shot_list_id) {
+        const { data } = await supabase
+          .from('dc_shots')
+          .select('*')
+          .eq('shot_list_id', card.shot_list_id)
+          .order('ordinal', { ascending: true })
+        shots = (data ?? []) as ShotRow[]
+      }
+
       const res = await runAgentTurn({
         model,
         type: card.type,
         fields: card.fields,
+        shots,
+        scenes: (card.scenes ?? []) as Scene[],
         ancestors,
         history,
         userMessage: text,
@@ -323,9 +362,16 @@ function Studio({ session }: { session: Session }) {
       const nextFields = applyUpdates(card.fields, res.updates)
       const titleUpdate = res.updates.find((u) => u.key === TITLE_KEY[card.type])
       const title = titleUpdate ? titleUpdate.value : card.title
+      const nextScenes = res.scenes ?? ((card.scenes ?? []) as Scene[])
 
-      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, title }))
-      persistCard(card.id, { fields: nextFields, title }, true)
+      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, title, scenes: nextScenes }))
+      persistCard(
+        card.id,
+        res.scenes
+          ? { fields: nextFields, title, scenes: nextScenes }
+          : { fields: nextFields, title },
+        true,
+      )
 
       const { data, error } = await supabase
         .from('dc_messages')
@@ -519,6 +565,9 @@ function Studio({ session }: { session: Session }) {
             <CardWorkspace
               card={card}
               messages={messages}
+              shotLists={shotLists}
+              onSceneChange={onSceneChange}
+              onShotListChange={onShotListChange}
               ancestors={ancestors}
               busy={busy}
               streamText={streamText}

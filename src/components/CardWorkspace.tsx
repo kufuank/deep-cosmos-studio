@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
-import { schemas, fieldStats } from '../schemas'
-import type { CardFields, CardType } from '../schemas'
+import { schemas, fieldStats, isSceneCard } from '../schemas'
+import type { CardFields, CardType, Scene } from '../schemas'
+import type { ShotListRow } from '../lib/supabase'
+import { SceneList } from './SceneList'
 import type { CardRow, MessageRow } from '../lib/supabase'
 import { FieldGrid } from './FieldGrid'
 import { ChatPanel } from './ChatPanel'
@@ -17,11 +19,17 @@ export function CardWorkspace({
   status,
   error,
   saving,
+  shotLists,
   onFieldChange,
+  onSceneChange,
+  onShotListChange,
   onSend,
   onToggleLock,
 }: {
   card: CardRow
+  shotLists: ShotListRow[]
+  onSceneChange: (index: number, patch: Partial<Scene>) => void
+  onShotListChange: (id: string | null) => void
   messages: MessageRow[]
   ancestors: Partial<Record<CardType, CardFields>>
   busy: boolean
@@ -38,9 +46,12 @@ export function CardWorkspace({
   const stats = useMemo(() => fieldStats(schema, card.fields), [schema, card.fields])
   const [pane, setPane] = useState<Pane>('chat')
 
+  const scenes = (card.scenes ?? []) as Scene[]
+  const sceneCard = isSceneCard(card.type)
+
   const ctx = useMemo(
-    () => ({ type: card.type, fields: card.fields, ancestors }),
-    [card.type, card.fields, ancestors],
+    () => ({ type: card.type, fields: card.fields, ancestors, scenes }),
+    [card.type, card.fields, ancestors, scenes],
   )
 
   const pct = Math.round((stats.resolved / stats.total) * 100)
@@ -63,11 +74,28 @@ export function CardWorkspace({
             </div>
             <p className="nums text-xs text-slate-500 mt-0.5">
               {stats.resolved}/{stats.total} alan · {stats.confirmed} onaylı · {stats.inferred} çıkarım
+              {sceneCard && <span className="ml-2">· {scenes.length} sahne</span>}
               {saving && <span className="ml-2 text-slate-600">kaydediliyor…</span>}
             </p>
           </div>
 
           <div className="flex items-center gap-2">
+            {sceneCard && (
+              <select
+                className="input py-1 w-auto max-w-[220px] text-xs"
+                value={card.shot_list_id ?? ''}
+                disabled={locked}
+                onChange={(e) => onShotListChange(e.target.value || null)}
+                title="Uyarlanacak referans shot list"
+              >
+                <option value="">— shot list seçin —</option>
+                {shotLists.map((l) => (
+                  <option key={l.id} value={l.id}>
+                    {l.title}
+                  </option>
+                ))}
+              </select>
+            )}
             <button className="btn-ghost" onClick={onToggleLock}>
               {locked ? 'Kilidi aç' : 'Kartı kilitle'}
             </button>
@@ -92,7 +120,7 @@ export function CardWorkspace({
               pane === p ? 'bg-white/10 text-slate-100' : 'text-slate-500 hover:text-slate-300'
             }`}
           >
-            {p === 'chat' ? 'Sohbet' : p === 'fields' ? 'Alanlar' : 'Promptlar'}
+            {p === 'chat' ? 'Sohbet' : p === 'fields' ? (sceneCard ? 'Sahneler' : 'Alanlar') : 'Promptlar'}
           </button>
         ))}
       </div>
@@ -113,6 +141,11 @@ export function CardWorkspace({
 
         <div className={`h-full min-h-0 overflow-auto ${pane === 'fields' ? 'block' : 'hidden'} xl:block`}>
           <FieldGrid schema={schema} fields={card.fields} locked={locked} onChange={onFieldChange} />
+          {sceneCard && (
+            <div className="border-t border-edge">
+              <SceneList scenes={scenes} ctx={ctx} locked={locked} onChange={onSceneChange} />
+            </div>
+          )}
         </div>
 
         <div className={`h-full min-h-0 ${pane === 'prompts' ? 'block' : 'hidden'} xl:block`}>

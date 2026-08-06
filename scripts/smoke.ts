@@ -2,9 +2,9 @@
  * Logic smoke test: schema integrity, prompt assembly and inheritance.
  * Run with: npm run smoke
  */
-import { schemas, cardOrder, allFields } from '../src/schemas'
-import type { CardFields, CardType } from '../src/schemas'
-import { buildPrompts } from '../src/lib/prompt'
+import { schemas, cardOrder, allFields, isSceneCard, SCENE_FIELDS } from '../src/schemas'
+import type { CardFields, CardType, Scene } from '../src/schemas'
+import { buildPrompts, sceneVideoPrompt } from '../src/lib/prompt'
 import { buildSystemPrompt, applyUpdates } from '../src/agents/runner'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
@@ -290,11 +290,87 @@ console.log('\n== stream accumulator ==')
   check('malformed events skipped', b?.type === 'text' && b.text === 'ok', JSON.stringify(b))
 }
 
+console.log('\n== storyboard ==')
+{
+  const sbFields = fill('storyboard', 20)
+  const scenes: Scene[] = [
+    {
+      timestamp_start: '00:00.0',
+      timestamp_end: '00:04.2',
+      scene_description: 'Wide establishing over the basin',
+      camera_angle: 'Eye Level',
+      shot_type: 'Wide',
+      camera_movement: 'Slow pan right',
+      visual_prompt: 'SCENE_ONE_VISUAL',
+      audio: 'Wind over mineral spires',
+      voice_over: 'At first light the basin stirs.',
+      source_shot: 'Shot 4 | 00:00:12.000 – 00:00:16.200',
+    },
+    {
+      timestamp_start: '00:04.2',
+      timestamp_end: '00:09.0',
+      scene_description: 'Close on the forager',
+      camera_angle: 'Low Angle',
+      shot_type: 'Close-Up',
+      camera_movement: 'Static',
+      visual_prompt: 'SCENE_TWO_VISUAL',
+      audio: 'Feeding clicks',
+      voice_over: 'It works the crevice methodically.',
+      source_shot: 'Shot 5 | 00:00:16.200 – 00:00:21.000',
+    },
+  ]
+
+  const ctx = {
+    type: 'storyboard' as CardType,
+    fields: sbFields,
+    ancestors: { planet: planetFields, ecosystem: ecoFields, species: speciesFields },
+    scenes,
+  }
+  const sb = buildPrompts(ctx)
+  check('three storyboard prompts', sb.length === 3, String(sb.length))
+
+  const board = sb.find((p) => p.kind === 'sheet')!
+  check('board states the frame count', board.text.includes('containing 2 storyboard frames'))
+  check('board lists every frame', board.text.includes('FRAME 01') && board.text.includes('FRAME 02'))
+  check('board carries planet constraint', board.text.includes('TEST_PLANET_NAME'))
+
+  const seq = sb.find((p) => p.kind === 'video')!
+  check('sequence includes both scenes', seq.text.includes('SCENE_ONE_VISUAL') && seq.text.includes('SCENE_TWO_VISUAL'))
+  check('sequence forbids narration', seq.text.includes('No narration'))
+  check('sequence forbids Earth reference', seq.text.includes('No references to Earth'))
+  check(
+    'narration kept out of the generation prompt',
+    !seq.text.includes('At first light the basin stirs.'),
+  )
+
+  const narration = sb.find((p) => p.kind === 'still')!
+  check('narration track carries the voice-over', narration.text.includes('At first light the basin stirs.'))
+
+  // Per-scene prompts are what actually gets pasted into a video model.
+  const one = sceneVideoPrompt(ctx, scenes[0])
+  check('scene prompt is self-contained', one.includes('SCENE_ONE_VISUAL') && one.includes('WORLD RULES'))
+  check('scene prompt carries its own camera work', one.includes('Slow pan right'))
+  check('scene prompt excludes the other scene', !one.includes('SCENE_TWO_VISUAL'))
+  check('scene prompt forbids voice-over', one.includes('No voice-over'))
+  check('scene prompt inherits the planet', one.includes('TEST_PLANET_NAME'))
+
+  // An empty storyboard must still be honest rather than emitting a broken prompt.
+  const empty = buildPrompts({ ...ctx, scenes: [] })
+  check('empty storyboard reports missing scenes', empty[0].missing.includes('Sahneler'))
+
+  check('storyboard is last in the pipeline', cardOrder[cardOrder.length - 1] === 'storyboard')
+  check('storyboard follows location', schemas.storyboard.parent === 'location')
+  check('storyboard is a scene card', isSceneCard('storyboard') && !isSceneCard('planet'))
+  check('scene contract has 10 fields', SCENE_FIELDS.length === 10, String(SCENE_FIELDS.length))
+}
+
 console.log('\n== protocol completeness ==')
 // These sections come straight from the source PROTOCOL documents. Condensing
 // them away once cost the approval loop and the improvement proposal entirely.
 {
-  const REQUIRED = [
+  // The four identity sheets share one protocol shape; the storyboard adapts a
+  // sequence instead of resolving fields, so its sections differ by design.
+  const SHEET_SECTIONS = [
     'USER INTERACTION',
     'INFERENCE RULES',
     'CONSISTENCY RULES',
@@ -305,11 +381,30 @@ console.log('\n== protocol completeness ==')
     'LANGUAGE',
     'OUTPUT DISCIPLINE',
   ]
+  const STORYBOARD_SECTIONS = [
+    'THE WORLD IS REAL',
+    'SEQUENCE SELECTION',
+    'PRESERVE VERSUS ADAPT',
+    'CONSISTENCY',
+    'AUDIO AND NARRATION',
+    'OUTPUT VALIDATION',
+    'REVISION AND APPROVAL',
+    'PROTOCOL IMPROVEMENT PROPOSAL',
+    'LANGUAGE',
+    'OUTPUT DISCIPLINE',
+  ]
   for (const t of cardOrder) {
     const p = protocolText(t)
-    const missing = REQUIRED.filter((s) => !p.includes(s))
+    const required = t === 'storyboard' ? STORYBOARD_SECTIONS : SHEET_SECTIONS
+    const missing = required.filter((s) => !p.includes(s))
     check(`${t}: every protocol section present`, missing.length === 0, missing.join(', '))
   }
+
+  const sb = protocolText('storyboard')
+  check('storyboard forbids reordering shots', sb.includes('Do not reorder shots'))
+  check('storyboard maps one shot to one scene', sb.includes('exactly one scene'))
+  check('storyboard names the scene tool', sb.includes('set_scenes'))
+  check('storyboard never breaks the fiction', sb.includes('Never reveal that the documentary is fictional'))
   const planet = protocolText('planet')
   check('names the proposal tool', planet.includes('propose_protocol_improvement'))
   check(

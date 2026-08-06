@@ -1,7 +1,7 @@
 import { streamAnthropic } from '../lib/anthropic'
 import type { ApiMessage, ContentBlock, ToolDef } from '../lib/anthropic'
-import { schemas, cardOrder, allFields } from '../schemas'
-import type { CardFields, CardType, FieldValue } from '../schemas'
+import { schemas, cardOrder, allFields, isSceneCard, SCENE_FIELDS } from '../schemas'
+import type { CardFields, CardType, FieldValue, Scene } from '../schemas'
 import { loadAgentConfig } from './config'
 import type { AgentConfig } from './config'
 
@@ -16,6 +16,8 @@ export interface AgentTurnResult {
   /** Assistant chat text to show the user. */
   text: string
   updates: FieldUpdate[]
+  /** Replacement scene list, when the storyboard agent rewrote it. */
+  scenes: Scene[] | null
   /** Present when the agent produced a protocol improvement proposal. */
   proposal: ProtocolProposal | null
   /** Raw blocks appended to history so the next turn keeps tool context. */
@@ -86,6 +88,67 @@ const proposeTool: ToolDef = {
   },
 }
 
+const setScenesTool: ToolDef = {
+  name: 'set_scenes',
+  description:
+    'Write the complete ordered scene list for the storyboard. One source shot becomes exactly one scene. Call once with every scene — this replaces any previous scene list.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      scenes: {
+        type: 'array',
+        description: 'Scenes in playback order.',
+        items: {
+          type: 'object',
+          properties: {
+            timestamp_start: { type: 'string', description: 'Start of the scene, e.g. 00:00.0' },
+            timestamp_end: { type: 'string', description: 'End of the scene, e.g. 00:03.2' },
+            scene_description: {
+              type: 'string',
+              description: 'Short description of the shot, in English.',
+            },
+            camera_angle: { type: 'string', description: 'Low angle, eye level, aerial, overhead…' },
+            shot_type: { type: 'string', description: 'Wide, medium, close-up, macro…' },
+            camera_movement: {
+              type: 'string',
+              description: 'Static, pan, tilt, dolly, tracking, crane, drone, handheld…',
+            },
+            visual_prompt: {
+              type: 'string',
+              description:
+                'A detailed production-ready visual description adapted to the fictional world, in English. This is pasted directly into an image or video model.',
+            },
+            audio: { type: 'string', description: 'Diegetic environmental sound only, in English.' },
+            voice_over: {
+              type: 'string',
+              description:
+                'Wildlife documentary narration for this scene, in English, belonging entirely to the fictional world.',
+            },
+            source_shot: {
+              type: 'string',
+              description:
+                'Which shot of the source list this adapts, by number and timecode, for traceability.',
+            },
+          },
+          required: [
+            'timestamp_start',
+            'timestamp_end',
+            'scene_description',
+            'camera_angle',
+            'shot_type',
+            'camera_movement',
+            'visual_prompt',
+            'audio',
+            'voice_over',
+            'source_shot',
+          ],
+        },
+      },
+    },
+    required: ['scenes'],
+  },
+}
+
 export interface ProtocolProposal {
   proposed_change: string
   rationale: string
@@ -131,11 +194,68 @@ function ancestorBlock(type: CardType, ancestors: Partial<Record<CardType, CardF
   return out.join('\n\n')
 }
 
+/**
+ * The measured shot list the storyboard adapts. Durations are given explicitly
+ * because the protocol requires the adaptation to preserve them.
+ */
+export function shotListBlock(shots: ShotContext[]): string {
+  if (!shots.length) {
+    return `PRODUCTION SHOT LIBRARY\nNo shot list has been attached to this storyboard yet. Tell the user you need one before you can adapt a sequence, and do not invent shots.`
+  }
+  const rows = shots.map((s) => {
+    const dur = (s.end_seconds - s.start_seconds).toFixed(2)
+    return [
+      `Shot ${s.ordinal + 1} | ${s.timecode_start} – ${s.timecode_end} (${dur}s)`,
+      `  Type: ${s.shot_type} | Angle: ${s.camera_angle} | Movement: ${s.camera_movement}`,
+      `  Lens: ${s.lens} | DOF: ${s.dof} | Lighting: ${s.lighting}`,
+      `  Subject: ${s.main_subject}`,
+      `  Action: ${s.primary_action}`,
+      s.foreground ? `  Foreground: ${s.foreground}` : '',
+      `  Background: ${s.background}`,
+      `  Composition: ${s.composition}`,
+      `  Purpose: ${s.camera_purpose}`,
+      s.continuity_notes ? `  Continuity: ${s.continuity_notes}` : '',
+      s.technical_notes ? `  Technical: ${s.technical_notes}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+  })
+  return `PRODUCTION SHOT LIBRARY — the cinematographic source, measured from real footage\n${rows.join('\n\n')}`
+}
+
+export interface ShotContext {
+  ordinal: number
+  start_seconds: number
+  end_seconds: number
+  timecode_start: string
+  timecode_end: string
+  shot_type: string
+  camera_angle: string
+  camera_movement: string
+  lens: string
+  dof: string
+  main_subject: string
+  primary_action: string
+  foreground: string
+  background: string
+  composition: string
+  lighting: string
+  camera_purpose: string
+  continuity_notes: string
+  technical_notes: string
+}
+
+function sceneStateBlock(scenes: unknown[]): string {
+  if (!scenes.length) return 'CURRENT SCENES\nNone yet.'
+  return `CURRENT SCENES (${scenes.length})\n${JSON.stringify(scenes, null, 1)}`
+}
+
 export function buildSystemPrompt(
   type: CardType,
   fields: CardFields,
   ancestors: Partial<Record<CardType, CardFields>>,
   config: AgentConfig,
+  extra: { shots?: ShotContext[]; scenes?: unknown[] } = {},
 ): string {
   const parts = [config.role, `CORE KNOWLEDGE\n${config.knowledge}`, config.protocol]
 
@@ -146,9 +266,17 @@ export function buildSystemPrompt(
     )
   }
 
-  parts.push(
-    `CURRENT SHEET STATE\nThese are the fields you must resolve. Use the exact keys shown with set_fields.\n${fieldStateBlock(type, fields)}`,
-  )
+  if (type === 'storyboard') {
+    parts.push(shotListBlock(extra.shots ?? []))
+    parts.push(
+      `CURRENT BRIEF AND COMMON ATTRIBUTES\nUse the exact keys shown with set_fields.\n${fieldStateBlock(type, fields)}`,
+    )
+    parts.push(sceneStateBlock(extra.scenes ?? []))
+  } else {
+    parts.push(
+      `CURRENT SHEET STATE\nThese are the fields you must resolve. Use the exact keys shown with set_fields.\n${fieldStateBlock(type, fields)}`,
+    )
+  }
 
   return parts.join('\n\n────────────────────\n\n')
 }
@@ -166,6 +294,9 @@ export async function runAgentTurn(params: {
   userMessage: string
   /** Locked cards are frozen, but the agent may still reflect on the protocol. */
   locked?: boolean
+  /** Storyboard only: the shot list it adapts, and the scenes written so far. */
+  shots?: ShotContext[]
+  scenes?: Scene[]
   signal?: AbortSignal
   /** Assistant prose as it streams in. */
   onText?: (delta: string) => void
@@ -173,8 +304,12 @@ export async function runAgentTurn(params: {
   onStatus?: (status: string) => void
 }): Promise<AgentTurnResult> {
   const config = await loadAgentConfig(params.type)
-  const system = buildSystemPrompt(params.type, params.fields, params.ancestors, config)
+  const system = buildSystemPrompt(params.type, params.fields, params.ancestors, config, {
+    shots: params.shots,
+    scenes: params.scenes,
+  })
   const validKeys = new Set(allFields(schemas[params.type]).map((f) => f.key))
+  const sceneCard = isSceneCard(params.type)
 
   const messages: ApiMessage[] = [
     ...params.history,
@@ -183,6 +318,7 @@ export async function runAgentTurn(params: {
   const appended: ApiMessage[] = [{ role: 'user', content: params.userMessage }]
 
   const updates: FieldUpdate[] = []
+  let scenes: Scene[] | null = null
   let proposal: ProtocolProposal | null = null
   let text = ''
 
@@ -196,7 +332,11 @@ export async function runAgentTurn(params: {
       messages,
       // The proposal tool is only offered once the card is locked, so the agent
       // cannot mistake mid-conversation for the moment to reflect.
-      tools: params.locked ? [setFieldsTool, proposeTool] : [setFieldsTool],
+      tools: [
+        setFieldsTool,
+        ...(sceneCard ? [setScenesTool] : []),
+        ...(params.locked ? [proposeTool] : []),
+      ],
       signal: params.signal,
       onText: params.onText,
       onToolStart: () => params.onStatus?.('Alanlar yazılıyor'),
@@ -236,6 +376,33 @@ export async function runAgentTurn(params: {
         continue
       }
 
+      if (tu.name === 'set_scenes') {
+        const raw = (tu.input as { scenes?: unknown[] })?.scenes
+        const parsed = Array.isArray(raw)
+          ? raw
+              .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+              .map((s) => {
+                const out = {} as Scene
+                for (const k of SCENE_FIELDS) {
+                  const v = s[k]
+                  out[k] = typeof v === 'string' ? v : ''
+                }
+                return out
+              })
+              // A scene with no visual prompt cannot be rendered, so it is not a scene.
+              .filter((s) => s.visual_prompt.trim())
+          : []
+        if (parsed.length) scenes = parsed
+        results.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: parsed.length
+            ? `Wrote ${parsed.length} scene(s).`
+            : 'No usable scenes received — every scene needs a visual_prompt.',
+        })
+        continue
+      }
+
       const input = tu.input as { updates?: FieldUpdate[] }
       const accepted: string[] = []
       const rejected: string[] = []
@@ -264,7 +431,7 @@ export async function runAgentTurn(params: {
     appended.push(resultMsg)
   }
 
-  return { text: text.trim(), updates, proposal, history: appended }
+  return { text: text.trim(), updates, scenes, proposal, history: appended }
 }
 
 export function applyUpdates(fields: CardFields, updates: FieldUpdate[]): CardFields {
