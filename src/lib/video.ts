@@ -21,10 +21,45 @@ export interface DetectProgress {
   total: number
 }
 
+export interface DetectionReport {
+  shots: number
+  durationSeconds: number
+  averageShotSeconds: number
+  longestShotSeconds: number
+  /** Set when the result looks like missed cuts rather than genuine long takes. */
+  warning: string | null
+}
+
+/** Documentary shots run seconds, not minutes; longer usually means missed cuts. */
+const SUSPICIOUS_SHOT_SECONDS = 20
+
+export function reviewDetection(shots: DetectedShot[], duration: number): DetectionReport {
+  const lengths = shots.map((s) => s.endSeconds - s.startSeconds)
+  const longest = lengths.length ? Math.max(...lengths) : 0
+  const average = lengths.length ? duration / lengths.length : 0
+
+  let warning: string | null = null
+  if (shots.length <= 1 && duration > SUSPICIOUS_SHOT_SECONDS) {
+    warning =
+      'Hiç kesme bulunamadı ve video tek plan sayıldı. Video gerçekten tek çekimse sorun yok; değilse hassasiyeti düşürüp tekrar deneyin.'
+  } else if (longest > SUSPICIOUS_SHOT_SECONDS) {
+    warning = `En uzun plan ${longest.toFixed(1)} saniye. Belgesel planları nadiren bu kadar uzundur — muhtemelen bazı kesmeler atlandı. Hassasiyeti düşürüp tekrar deneyin.`
+  }
+  return {
+    shots: shots.length,
+    durationSeconds: duration,
+    averageShotSeconds: average,
+    longestShotSeconds: longest,
+    warning,
+  }
+}
+
 const SIGNATURE_W = 32
 const SIGNATURE_H = 18
 /** Shots shorter than this are treated as detection noise and merged. */
 const MIN_SHOT_SECONDS = 0.45
+/** Upper bound on frames sent per shot, to keep request payloads sane. */
+const MAX_FRAMES_PER_SHOT = 6
 
 export function formatTimecode(seconds: number): string {
   const s = Math.max(0, seconds)
@@ -69,6 +104,45 @@ function seek(video: HTMLVideoElement, time: number): Promise<void> {
   })
 }
 
+function median(xs: number[]): number {
+  if (!xs.length) return 0
+  const s = [...xs].sort((a, b) => a - b)
+  const m = s.length >> 1
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
+
+/**
+ * Indices where the frame signature jumps enough to call a cut.
+ *
+ * The baseline is the median and the median absolute deviation, not the mean and
+ * standard deviation. Cuts are exactly the outliers being looked for, and they
+ * drag the mean and especially the standard deviation upward — enough that on
+ * densely cut footage the threshold climbs above the cuts themselves and the
+ * whole clip collapses into one shot. Median and MAD are unmoved by a minority
+ * of large values, so the baseline describes ordinary within-shot motion.
+ *
+ * `sensitivity` scales the margin: below 1 finds more cuts, above 1 fewer.
+ */
+export function findCutIndices(deltas: number[], sensitivity = 1): number[] {
+  // The first sample has no predecessor, so it carries no usable delta.
+  const body = deltas.slice(1)
+  if (body.length < 2) return []
+
+  const base = median(body)
+  const mad = median(body.map((d) => Math.abs(d - base)))
+
+  // MAD collapses to zero on perfectly still footage; the floor keeps the
+  // threshold meaningful there instead of flagging every sample.
+  const margin = Math.max(mad * 8, 0.06) * sensitivity
+  const threshold = Math.max(base + margin, 0.07 * sensitivity)
+
+  const out: number[] = []
+  for (let i = 1; i < deltas.length; i++) {
+    if (deltas[i] >= threshold) out.push(i)
+  }
+  return out
+}
+
 /** Mean absolute difference between two signatures, normalised to 0..1. */
 function signatureDelta(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
   let sum = 0
@@ -105,11 +179,13 @@ export async function detectShots(
     sampleInterval?: number
     framesPerShot?: number
     frameWidth?: number
+    /** Below 1 finds more cuts, above 1 fewer. */
+    sensitivity?: number
     signal?: AbortSignal
     onProgress?: (p: DetectProgress) => void
   } = {},
 ): Promise<DetectedShot[]> {
-  const interval = opts.sampleInterval ?? 0.4
+  const interval = opts.sampleInterval ?? 0.25
   const framesPerShot = opts.framesPerShot ?? 3
   const frameWidth = opts.frameWidth ?? 640
   const duration = video.duration
@@ -136,22 +212,14 @@ export async function detectShots(
     opts.onProgress?.({ phase: 'sampling', done: i + 1, total: times.length })
   }
 
-  // Pass 2 — adaptive threshold. A fixed cutoff misfires on both very static
-  // footage and constantly moving handheld work, so scale it to this video.
+  // Pass 2 — locate cuts against a robust baseline.
   opts.onProgress?.({ phase: 'grouping', done: 0, total: 1 })
-  const meaningful = deltas.slice(1)
-  const mean = meaningful.reduce((a, b) => a + b, 0) / Math.max(1, meaningful.length)
-  const variance =
-    meaningful.reduce((a, b) => a + (b - mean) ** 2, 0) / Math.max(1, meaningful.length)
-  const sd = Math.sqrt(variance)
-  const threshold = Math.max(0.08, mean + 2.5 * sd)
+  const cutIdx = findCutIndices(deltas, opts.sensitivity ?? 1)
 
   const boundaries: number[] = [0]
-  for (let i = 1; i < deltas.length; i++) {
-    if (deltas[i] >= threshold) {
-      const t = times[i]
-      if (t - boundaries[boundaries.length - 1] >= MIN_SHOT_SECONDS) boundaries.push(t)
-    }
+  for (const i of cutIdx) {
+    const t = times[i]
+    if (t - boundaries[boundaries.length - 1] >= MIN_SHOT_SECONDS) boundaries.push(t)
   }
 
   const shots: DetectedShot[] = boundaries.map((start, i) => ({
@@ -170,7 +238,10 @@ export async function detectShots(
     const inset = Math.min(0.12, span * 0.15)
     const from = s.startSeconds + inset
     const to = Math.max(from, s.endSeconds - inset)
-    const n = Math.max(1, Math.min(framesPerShot, Math.ceil(span / 0.5)))
+    // Longer spans get more frames. If a cut was missed, this at least gives the
+    // model enough coverage to describe what it is actually looking at rather
+    // than extrapolating across minutes from three stills.
+    const n = Math.max(1, Math.min(MAX_FRAMES_PER_SHOT, Math.max(framesPerShot, Math.ceil(span / 4))))
     for (let k = 0; k < n; k++) {
       const t = n === 1 ? (from + to) / 2 : from + ((to - from) * k) / (n - 1)
       await seek(video, t)

@@ -31,7 +31,7 @@ export function ChatPanel({
 
   function submit() {
     const t = draft.trim()
-    if (!t || busy || locked) return
+    if (!t || busy) return
     setDraft('')
     onSend(t)
   }
@@ -97,13 +97,14 @@ export function ChatPanel({
       </div>
 
       <div className="border-t border-edge p-3 shrink-0">
-        {locked ? (
-          <p className="text-xs text-slate-500 text-center py-2">
-            Kart kilitli. Değişiklik için önce kilidi açın.
+        {locked && (
+          <p className="text-[11px] text-slate-500 mb-2">
+            Kart kilitli — alanlar donduruldu. Ajanla konuşmaya devam edebilir, protokol
+            iyileştirme önerisini isteyebilirsiniz. Değer değiştirmek için kilidi açın.
           </p>
-        ) : (
-          <div className="flex gap-2">
-            <textarea
+        )}
+        <div className="flex gap-2">
+          <textarea
               className="input resize-none h-[76px]"
               placeholder="Mesajınızı yazın… (Enter ile gönder, Shift+Enter yeni satır)"
               value={draft}
@@ -116,11 +117,10 @@ export function ChatPanel({
                 }
               }}
             />
-            <button className="btn-primary self-end" onClick={submit} disabled={busy || !draft.trim()}>
-              Gönder
-            </button>
-          </div>
-        )}
+          <button className="btn-primary self-end" onClick={submit} disabled={busy || !draft.trim()}>
+            Gönder
+          </button>
+        </div>
       </div>
     </div>
   )

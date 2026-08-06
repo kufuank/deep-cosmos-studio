@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from './lib/supabase'
-import type { CardRow, MessageRow, WorldRow } from './lib/supabase'
+import type { CardRow, MessageRow, ProposalRow, WorldRow } from './lib/supabase'
 import { cardOrder, schemas } from './schemas'
 import type { CardFields, CardType } from './schemas'
 import { runAgentTurn, applyUpdates } from './agents/runner'
@@ -11,6 +11,7 @@ import { describeError } from './lib/errors'
 import { Auth } from './components/Auth'
 import { Settings } from './components/Settings'
 import { CardWorkspace } from './components/CardWorkspace'
+import { ProposalPanel } from './components/ProposalPanel'
 import { ShotLibrary } from './components/ShotLibrary'
 
 type View = 'worlds' | 'shots'
@@ -69,7 +70,66 @@ function Studio({ session }: { session: Session }) {
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<View>('worlds')
 
+  const [proposals, setProposals] = useState<ProposalRow[]>([])
   const saveTimer = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
+
+  const loadProposals = useCallback(async () => {
+    const { data } = await supabase
+      .from('dc_protocol_proposals')
+      .select('*')
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+    setProposals((data ?? []) as ProposalRow[])
+  }, [])
+
+  useEffect(() => {
+    void loadProposals()
+  }, [loadProposals])
+
+  async function decideProposal(p: ProposalRow, approve: boolean) {
+    if (approve) {
+      // Approval appends the rule to the agent's protocol as a new active
+      // version; the previous one is retired rather than overwritten.
+      const { data: current } = await supabase
+        .from('dc_agents')
+        .select('*')
+        .eq('agent', p.agent)
+        .eq('active', true)
+        .order('owner', { ascending: false, nullsFirst: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (current) {
+        await supabase
+          .from('dc_agents')
+          .update({ active: false })
+          .eq('owner', session.user.id)
+          .eq('agent', p.agent)
+
+        const { error: insErr } = await supabase.from('dc_agents').insert({
+          owner: session.user.id,
+          agent: p.agent,
+          version: (current.version ?? 1) + 1,
+          active: true,
+          role: current.role,
+          knowledge: current.knowledge,
+          protocol: `${current.protocol}\n\nEK KURAL (onaylanan iyileştirme)\n${p.proposed_protocol}`,
+          note: p.rationale,
+        })
+        if (insErr) {
+          setError(describeError(insErr))
+          return
+        }
+        clearAgentConfigCache()
+      }
+    }
+
+    await supabase
+      .from('dc_protocol_proposals')
+      .update({ status: approve ? 'approved' : 'rejected', decided_at: new Date().toISOString() })
+      .eq('id', p.id)
+    void loadProposals()
+  }
 
   const loadWorlds = useCallback(async () => {
     const { data, error } = await supabase
@@ -242,9 +302,23 @@ function Studio({ session }: { session: Session }) {
         ancestors,
         history,
         userMessage: text,
+        locked: card.status === 'locked',
         onText: (d) => setStreamText((t) => t + d),
         onStatus: setStatus,
       })
+
+      if (res.proposal) {
+        const { error: pErr } = await supabase.from('dc_protocol_proposals').insert({
+          owner: session.user.id,
+          agent: card.type,
+          from_version: 0,
+          proposed_protocol: res.proposal.proposed_change,
+          rationale: res.proposal.rationale,
+          expected_benefit: res.proposal.expected_benefit,
+        })
+        if (pErr) setError(describeError(pErr))
+        else void loadProposals()
+      }
 
       const nextFields = applyUpdates(card.fields, res.updates)
       const titleUpdate = res.updates.find((u) => u.key === TITLE_KEY[card.type])
@@ -436,7 +510,11 @@ function Studio({ session }: { session: Session }) {
           )}
         </aside>
 
-        <main className="flex-1 min-w-0 min-h-0">
+        <main className="flex-1 min-w-0 min-h-0 flex flex-col">
+          <ProposalPanel
+            proposals={proposals.filter((p) => !card || p.agent === card.type)}
+            onDecide={decideProposal}
+          />
           {card ? (
             <CardWorkspace
               card={card}

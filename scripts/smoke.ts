@@ -8,7 +8,7 @@ import { buildPrompts } from '../src/lib/prompt'
 import { buildSystemPrompt, applyUpdates } from '../src/agents/runner'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
-import { formatTimecode, dataUrlParts } from '../src/lib/video'
+import { formatTimecode, dataUrlParts, findCutIndices } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
 import { createStreamAccumulator } from '../src/lib/anthropic'
 import { describeError, isAbort } from '../src/lib/errors'
@@ -288,6 +288,104 @@ console.log('\n== stream accumulator ==')
   const r = acc.finish()
   const b = r.content[0]
   check('malformed events skipped', b?.type === 'text' && b.text === 'ok', JSON.stringify(b))
+}
+
+console.log('\n== protocol completeness ==')
+// These sections come straight from the source PROTOCOL documents. Condensing
+// them away once cost the approval loop and the improvement proposal entirely.
+{
+  const REQUIRED = [
+    'USER INTERACTION',
+    'INFERENCE RULES',
+    'CONSISTENCY RULES',
+    'OUTPUT VALIDATION',
+    'REVISION AND APPROVAL',
+    'LOCKING',
+    'PROTOCOL IMPROVEMENT PROPOSAL',
+    'LANGUAGE',
+    'OUTPUT DISCIPLINE',
+  ]
+  for (const t of cardOrder) {
+    const p = protocolText(t)
+    const missing = REQUIRED.filter((s) => !p.includes(s))
+    check(`${t}: every protocol section present`, missing.length === 0, missing.join(', '))
+  }
+  const planet = protocolText('planet')
+  check('names the proposal tool', planet.includes('propose_protocol_improvement'))
+  check(
+    'forbids self-declared approval',
+    planet.includes('only the user does that'),
+  )
+  check(
+    'forbids storing project-specific knowledge in proposals',
+    planet.includes('Never store project-specific knowledge'),
+  )
+  check('domain word is substituted', protocolText('species').includes('biological consistency'))
+}
+
+console.log('\n== cut detection ==')
+{
+  /** Builds a delta series: quiet within-shot motion, spikes at cuts. */
+  function series(nSamples: number, cutAt: number[], motion = 0.05, cut = 0.45): number[] {
+    const d: number[] = []
+    for (let i = 0; i < nSamples; i++) {
+      // Deterministic wobble so the baseline is not perfectly flat.
+      const wobble = motion * (0.6 + 0.8 * Math.abs(Math.sin(i * 1.7)))
+      d.push(cutAt.includes(i) ? cut : wobble)
+    }
+    d[0] = 0
+    return d
+  }
+
+  // Densely cut footage — a documentary montage, roughly a cut every 1.5s at
+  // 0.25s sampling. This is the regime where the old statistic collapses.
+  const cuts = Array.from({ length: 34 }, (_, k) => (k + 1) * 6)
+  const deltas = series(210, cuts)
+
+  // The statistic that shipped: cuts inflate the mean and the standard
+  // deviation, lifting the threshold above the very spikes it should catch.
+  const body = deltas.slice(1)
+  const mean = body.reduce((a, b) => a + b, 0) / body.length
+  const sd = Math.sqrt(body.reduce((a, b) => a + (b - mean) ** 2, 0) / body.length)
+  const oldThreshold = Math.max(0.08, mean + 2.5 * sd)
+  const oldFound = deltas.filter((d, i) => i > 0 && d >= oldThreshold).length
+  check(
+    'reproduces the old failure: mean+2.5sd misses every cut',
+    oldFound === 0,
+    `found ${oldFound} of ${cuts.length}, threshold ${oldThreshold.toFixed(3)}`,
+  )
+
+  const found = findCutIndices(deltas)
+  check('finds every cut', found.length === cuts.length, `${found.length}/${cuts.length}`)
+  check('finds them at the right samples', found.join(',') === cuts.join(','), found.join(','))
+
+  // Density must not defeat it — this is what a fast-cut sequence looks like.
+  const dense = Array.from({ length: 60 }, (_, i) => i)
+    .filter((i) => i % 3 === 0 && i > 0)
+  const denseFound = findCutIndices(series(60, dense))
+  check('holds up when a third of samples are cuts', denseFound.length === dense.length,
+    `${denseFound.length}/${dense.length}`)
+
+  // Static footage must not dissolve into noise.
+  const still = findCutIndices(Array.from({ length: 80 }, () => 0.004))
+  check('no cuts in a locked-off static shot', still.length === 0, String(still.length))
+
+  // Continuous handheld motion is not a cut.
+  const handheld = Array.from({ length: 80 }, (_, i) => 0.14 + 0.03 * Math.sin(i))
+  check('sustained camera motion is not mistaken for cuts', findCutIndices(handheld).length === 0,
+    String(findCutIndices(handheld).length))
+
+  // A gentle cut between similar scenes should still register.
+  const subtle = findCutIndices(series(80, [20, 40, 60], 0.04, 0.22))
+  check('catches a low-contrast cut', subtle.length === 3, String(subtle.length))
+
+  // Sensitivity is a real dial in both directions.
+  const loose = findCutIndices(series(80, [20, 40, 60], 0.05, 0.20), 0.5)
+  const tight = findCutIndices(series(80, [20, 40, 60], 0.05, 0.20), 3)
+  check('lower sensitivity finds at least as many', loose.length >= 3, String(loose.length))
+  check('higher sensitivity finds fewer', tight.length < 3, String(tight.length))
+
+  check('degenerate input is safe', findCutIndices([]).length === 0 && findCutIndices([0.5]).length === 0)
 }
 
 console.log('\n== error reporting ==')

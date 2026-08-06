@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import type { ShotListRow, ShotRow } from '../lib/supabase'
-import { detectShots, formatTimecode, loadVideo } from '../lib/video'
-import type { DetectedShot } from '../lib/video'
+import { detectShots, formatTimecode, loadVideo, reviewDetection } from '../lib/video'
+import type { DetectedShot, DetectionReport } from '../lib/video'
 import { analyseShot, shotSummary } from '../agents/deconstruct'
 import { useSettings } from '../lib/settings'
 import { describeError, isAbort } from '../lib/errors'
@@ -23,6 +23,8 @@ export function ShotLibrary({ session }: { session: Session }) {
   const [progress, setProgress] = useState<Progress | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [sensitivity, setSensitivity] = useState(1)
+  const [report, setReport] = useState<DetectionReport | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
   const playerRef = useRef<HTMLVideoElement>(null)
@@ -107,6 +109,7 @@ export function ShotLibrary({ session }: { session: Session }) {
       let detected: DetectedShot[] = []
       detected = await detectShots(video, {
         signal: controller.signal,
+        sensitivity,
         onProgress: (p) =>
           setProgress({
             label:
@@ -121,6 +124,11 @@ export function ShotLibrary({ session }: { session: Session }) {
       })
 
       if (!detected.length) throw new Error('Videoda plan tespit edilemedi.')
+
+      // Surface the shape of the detection before spending a call per shot, so a
+      // bad split can be corrected instead of paid for.
+      const rev = reviewDetection(detected, video.duration)
+      setReport(rev)
 
       let previous: string | undefined
       for (let i = 0; i < detected.length; i++) {
@@ -197,12 +205,24 @@ export function ShotLibrary({ session }: { session: Session }) {
     <div className="flex h-full min-h-0">
       <aside className="w-60 shrink-0 border-r border-edge overflow-auto p-3">
         <button
-          className="btn-primary w-full text-xs mb-3"
+          className="btn-primary w-full text-xs mb-2"
           disabled={busy}
           onClick={() => fileRef.current?.click()}
         >
           + Referans video
         </button>
+
+        <label className="label mt-2">Kesme hassasiyeti</label>
+        <select
+          className="input text-xs py-1 mb-3"
+          value={sensitivity}
+          disabled={busy}
+          onChange={(e) => setSensitivity(Number(e.target.value))}
+        >
+          <option value={0.6}>Yüksek — daha çok kesme bulur</option>
+          <option value={1}>Normal</option>
+          <option value={1.6}>Düşük — daha az kesme bulur</option>
+        </select>
         <input
           ref={fileRef}
           type="file"
@@ -271,6 +291,24 @@ export function ShotLibrary({ session }: { session: Session }) {
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 mb-4">
             <p className="text-sm text-red-300">{error}</p>
+          </div>
+        )}
+
+        {report && (
+          <div
+            className={`rounded-md border px-3 py-2 mb-4 ${
+              report.warning
+                ? 'border-amber-500/30 bg-amber-500/10'
+                : 'border-edge bg-white/[0.02]'
+            }`}
+          >
+            <p className="nums text-xs text-slate-400">
+              {report.shots} plan · ortalama {report.averageShotSeconds.toFixed(1)}s · en uzun{' '}
+              {report.longestShotSeconds.toFixed(1)}s
+            </p>
+            {report.warning && (
+              <p className="text-xs text-amber-300 mt-1 leading-relaxed">{report.warning}</p>
+            )}
           </div>
         )}
 

@@ -16,6 +16,8 @@ export interface AgentTurnResult {
   /** Assistant chat text to show the user. */
   text: string
   updates: FieldUpdate[]
+  /** Present when the agent produced a protocol improvement proposal. */
+  proposal: ProtocolProposal | null
   /** Raw blocks appended to history so the next turn keeps tool context. */
   history: ApiMessage[]
 }
@@ -57,6 +59,37 @@ const setFieldsTool: ToolDef = {
     },
     required: ['updates'],
   },
+}
+
+const proposeTool: ToolDef = {
+  name: 'propose_protocol_improvement',
+  description:
+    'After the user has locked or approved the card, record a generalised improvement to this agent’s own protocol. Use only for reusable methodology — never for facts about this particular world. Call at most once.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      proposed_change: {
+        type: 'string',
+        description:
+          'The rule to add or amend, written so it applies to any future card, in Turkish.',
+      },
+      rationale: {
+        type: 'string',
+        description: 'What in this interaction revealed the gap, in Turkish.',
+      },
+      expected_benefit: {
+        type: 'string',
+        description: 'What improves in future runs if this is adopted, in Turkish.',
+      },
+    },
+    required: ['proposed_change', 'rationale', 'expected_benefit'],
+  },
+}
+
+export interface ProtocolProposal {
+  proposed_change: string
+  rationale: string
+  expected_benefit: string
 }
 
 function fieldStateBlock(type: CardType, fields: CardFields): string {
@@ -131,6 +164,8 @@ export async function runAgentTurn(params: {
   ancestors: Partial<Record<CardType, CardFields>>
   history: ApiMessage[]
   userMessage: string
+  /** Locked cards are frozen, but the agent may still reflect on the protocol. */
+  locked?: boolean
   signal?: AbortSignal
   /** Assistant prose as it streams in. */
   onText?: (delta: string) => void
@@ -148,6 +183,7 @@ export async function runAgentTurn(params: {
   const appended: ApiMessage[] = [{ role: 'user', content: params.userMessage }]
 
   const updates: FieldUpdate[] = []
+  let proposal: ProtocolProposal | null = null
   let text = ''
 
   // The model may call set_fields several times before answering; cap the loop
@@ -158,7 +194,9 @@ export async function runAgentTurn(params: {
       model: params.model,
       system,
       messages,
-      tools: [setFieldsTool],
+      // The proposal tool is only offered once the card is locked, so the agent
+      // cannot mistake mid-conversation for the moment to reflect.
+      tools: params.locked ? [setFieldsTool, proposeTool] : [setFieldsTool],
       signal: params.signal,
       onText: params.onText,
       onToolStart: () => params.onStatus?.('Alanlar yazılıyor'),
@@ -179,6 +217,25 @@ export async function runAgentTurn(params: {
 
     const results: ContentBlock[] = []
     for (const tu of toolUses) {
+      if (tu.name === 'propose_protocol_improvement') {
+        const p = tu.input as Partial<ProtocolProposal>
+        if (p?.proposed_change) {
+          proposal = {
+            proposed_change: String(p.proposed_change),
+            rationale: String(p.rationale ?? ''),
+            expected_benefit: String(p.expected_benefit ?? ''),
+          }
+        }
+        results.push({
+          type: 'tool_result',
+          tool_use_id: tu.id,
+          content: proposal
+            ? 'Öneri kaydedildi ve kullanıcının onayına sunuldu.'
+            : 'Öneri boştu, kaydedilmedi.',
+        })
+        continue
+      }
+
       const input = tu.input as { updates?: FieldUpdate[] }
       const accepted: string[] = []
       const rejected: string[] = []
@@ -207,7 +264,7 @@ export async function runAgentTurn(params: {
     appended.push(resultMsg)
   }
 
-  return { text: text.trim(), updates, history: appended }
+  return { text: text.trim(), updates, proposal, history: appended }
 }
 
 export function applyUpdates(fields: CardFields, updates: FieldUpdate[]): CardFields {

@@ -36,6 +36,19 @@ export interface CardRow {
   updated_at: string
 }
 
+export interface ProposalRow {
+  id: string
+  owner: string
+  agent: CardType
+  from_version: number
+  proposed_protocol: string
+  rationale: string
+  expected_benefit: string
+  status: 'pending' | 'approved' | 'rejected'
+  created_at: string
+  decided_at: string | null
+}
+
 export interface ShotListRow {
   id: string
   owner: string
