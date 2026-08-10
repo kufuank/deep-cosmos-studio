@@ -9,6 +9,7 @@ import { clearAgentConfigCache } from './agents/config'
 import { useSettings } from './lib/settings'
 import { describeError } from './lib/errors'
 import { Auth } from './components/Auth'
+import { ResetPassword } from './components/ResetPassword'
 import { Settings } from './components/Settings'
 import { CardWorkspace } from './components/CardWorkspace'
 import { ProposalPanel } from './components/ProposalPanel'
@@ -33,13 +34,20 @@ const TITLE_KEY: Record<CardType, string> = {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null)
   const [ready, setReady] = useState(false)
+  const [recovering, setRecovering] = useState(false)
 
   useEffect(() => {
+    // A recovery link arrives as a URL fragment. Read it before the client
+    // strips it, so a reload mid-reset does not silently drop the user onto the
+    // sign-in form with no explanation.
+    if (window.location.hash.includes('type=recovery')) setRecovering(true)
+
     supabase.auth.getSession().then(({ data }) => {
       setSession(data.session)
       setReady(true)
     })
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === 'PASSWORD_RECOVERY') setRecovering(true)
       setSession(s)
       clearAgentConfigCache()
     })
@@ -49,6 +57,17 @@ export default function App() {
   if (!ready) {
     return (
       <div className="min-h-screen grid place-items-center text-slate-600 text-sm">Yükleniyor…</div>
+    )
+  }
+  if (recovering) {
+    return (
+      <ResetPassword
+        onDone={() => {
+          // Clear the recovery fragment so a refresh does not reopen this screen.
+          window.history.replaceState(null, '', window.location.pathname)
+          setRecovering(false)
+        }}
+      />
     )
   }
   if (!session) return <Auth />
