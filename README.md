@@ -1,5 +1,8 @@
 # Deep Cosmos Studio
 
+> **Projeye ara verip döndüyseniz önce [DEVAM.md](DEVAM.md) okuyun** — nerede
+> kalındığı, sıradaki iş ve daha önce pahalıya öğrenilmiş tuzaklar orada.
+
 Faz 3 dünya inşa hattı. Gezegen → Ekosistem → Tür → Mekân zincirini yürüten,
 her kartı alan bazında takip eden ve sonunda kopyalanmaya hazır final promptlar
 üreten bir web uygulaması.
