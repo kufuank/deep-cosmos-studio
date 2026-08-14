@@ -96,7 +96,21 @@ export function CardWorkspace({
                 ))}
               </select>
             )}
-            <button className="btn-ghost" onClick={onToggleLock}>
+            <button
+              className="btn-ghost"
+              onClick={() => {
+                // Locking an empty sheet freezes it before the agent can fill it,
+                // and then every turn is silently rejected.
+                if (!locked && stats.resolved === 0) {
+                  const ok = window.confirm(
+                    'Bu kartta hiç dolu alan yok. Kilitlerseniz ajan alan yazamaz ve sohbet ilerlemez. Yine de kilitlensin mi?',
+                  )
+                  if (!ok) return
+                }
+                onToggleLock()
+              }}
+              title={locked ? 'Alanları yeniden düzenlemek için açın' : 'Onayladığınızda alanları dondurur'}
+            >
               {locked ? 'Kilidi aç' : 'Kartı kilitle'}
             </button>
           </div>

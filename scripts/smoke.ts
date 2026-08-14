@@ -364,6 +364,22 @@ console.log('\n== storyboard ==')
   check('scene contract has 10 fields', SCENE_FIELDS.length === 10, String(SCENE_FIELDS.length))
 }
 
+console.log('\n== locked cards ==')
+{
+  // A locked card is frozen at the database level. Offering the writing tools
+  // anyway let the agent attempt writes that were rejected while it was told they
+  // had succeeded — the sheet stayed empty and the chat went silent.
+  const locked = buildSystemPrompt('planet', {}, {}, cfg('planet'), { locked: true })
+  const open = buildSystemPrompt('planet', {}, {}, cfg('planet'), {})
+  check('locked card announces its state', locked.includes('CARD STATE — LOCKED'))
+  check(
+    'locked card forbids claiming a write',
+    locked.includes('Do not claim to have written anything'),
+  )
+  check('locked card points at the unlock control', locked.includes('Kilidi aç'))
+  check('unlocked card carries no such block', !open.includes('CARD STATE — LOCKED'))
+}
+
 console.log('\n== protocol completeness ==')
 // These sections come straight from the source PROTOCOL documents. Condensing
 // them away once cost the approval loop and the improvement proposal entirely.

@@ -281,7 +281,12 @@ function Studio({ session }: { session: Session }) {
       setSaving(true)
       const { error } = await supabase.from('dc_cards').update(patch).eq('id', id)
       setSaving(false)
-      if (error) setError(error.message)
+      if (error) {
+        // A rejected write used to vanish silently, leaving the screen showing
+        // values the database never accepted.
+        setError(`Kaydedilemedi — ${describeError(error)}`)
+        void reloadCard(id)
+      }
     }
     clearTimeout(saveTimer.current[id])
     if (immediate) void run()
@@ -290,6 +295,12 @@ function Studio({ session }: { session: Session }) {
 
   function updateCardLocal(id: string, mut: (c: CardRow) => CardRow) {
     setCards((cs) => cs.map((c) => (c.id === id ? mut(c) : c)))
+  }
+
+  /** Pulls the stored row back after a failed write, so the UI tells the truth. */
+  async function reloadCard(id: string) {
+    const { data } = await supabase.from('dc_cards').select('*').eq('id', id).maybeSingle()
+    if (data) setCards((cs) => cs.map((c) => (c.id === id ? (data as CardRow) : c)))
   }
 
   function onFieldChange(key: string, value: string) {
@@ -403,7 +414,11 @@ function Studio({ session }: { session: Session }) {
             card_id: card.id,
             owner: session.user.id,
             role: 'assistant',
-            text: res.text || '(Ajan yalnızca alanları güncelledi.)',
+            text:
+              res.text ||
+              (res.updates.length
+                ? `(Ajan ${res.updates.length} alanı güncelledi, ayrıca bir şey yazmadı.)`
+                : '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Kart kilitliyse önce kilidi açın.)'),
             wrote: res.updates.map((u) => u.key),
           },
         ])

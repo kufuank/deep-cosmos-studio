@@ -255,7 +255,7 @@ export function buildSystemPrompt(
   fields: CardFields,
   ancestors: Partial<Record<CardType, CardFields>>,
   config: AgentConfig,
-  extra: { shots?: ShotContext[]; scenes?: unknown[] } = {},
+  extra: { shots?: ShotContext[]; scenes?: unknown[]; locked?: boolean } = {},
 ): string {
   const parts = [config.role, `CORE KNOWLEDGE\n${config.knowledge}`, config.protocol]
 
@@ -263,6 +263,13 @@ export function buildSystemPrompt(
   if (anc) {
     parts.push(
       `INHERITED CONSTRAINTS\nThe following cards are already locked. Treat every property as fixed and immutable — your card must emerge naturally from them and may never contradict them.\n\n${anc}`,
+    )
+  }
+
+  if (extra.locked) {
+    parts.push(
+      `CARD STATE — LOCKED
+This card is locked, so its values are frozen and you have no tools to change them. Do not claim to have written anything. If the user asks for a change, tell them to unlock the card first using the Kilidi aç button. You may still discuss the card and produce a protocol improvement proposal.`,
     )
   }
 
@@ -307,6 +314,7 @@ export async function runAgentTurn(params: {
   const system = buildSystemPrompt(params.type, params.fields, params.ancestors, config, {
     shots: params.shots,
     scenes: params.scenes,
+    locked: params.locked,
   })
   const validKeys = new Set(allFields(schemas[params.type]).map((f) => f.key))
   const sceneCard = isSceneCard(params.type)
@@ -330,13 +338,13 @@ export async function runAgentTurn(params: {
       model: params.model,
       system,
       messages,
-      // The proposal tool is only offered once the card is locked, so the agent
-      // cannot mistake mid-conversation for the moment to reflect.
-      tools: [
-        setFieldsTool,
-        ...(sceneCard ? [setScenesTool] : []),
-        ...(params.locked ? [proposeTool] : []),
-      ],
+      // A locked card is frozen, so the writing tools are withdrawn entirely —
+      // offering them let the agent attempt writes that the database rejected
+      // while it was told they had succeeded. The proposal tool appears only
+      // once locked, so mid-conversation is never mistaken for reflection time.
+      tools: params.locked
+        ? [proposeTool]
+        : [setFieldsTool, ...(sceneCard ? [setScenesTool] : [])],
       signal: params.signal,
       onText: params.onText,
       onToolStart: () => params.onStatus?.('Alanlar yazılıyor'),
