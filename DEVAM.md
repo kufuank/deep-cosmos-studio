@@ -142,6 +142,20 @@ altında "Bu tur: N istek · X giriş, Y önbellekten · Z çıktı" satırı g�
 "Önbellekten" sıfırsa breakpoint tutmuyor demektir — önce sabit bloğun turlar
 arası bayt-aynı kalıp kalmadığına bakın.
 
+**Saglayici degistirmek yalnizca bridge.ts'i ilgilendirir.** Edge Function bir
+adaptordur: istemciye her zaman Anthropic bicimi konusur. NVIDIA NIM OpenAI
+uyumlu oldugu icin istegi cikarken cevirir, akisini donerken Anthropic
+olaylarina yeniden yazar. Model kimligi `claude-` ile basliyorsa Anthropic'e,
+degilse NIM'e gider (`providerFor`). Iki bicim arasindaki asil yapisal fark arac
+sonuclarindadir: Anthropic bir turun butun `tool_result`'larini tek user
+mesajinda paketler, OpenAI ise cagri basina ayri bir `tool` mesaji ister.
+Onbellek karsiligi yoktur - `cache_control` tasiyan sistem bloklari tek sistem
+mesajina birlesir, yani NIM'de prompt cache tasarrufu yoktur (ama NIM ucretsiz).
+Sinirlar: ~40 istek/dakika anahtar basina, ve NIM'de gorseli yalnizca `-vl-`
+iceren model okur - Shot Library icin baska model secilirse kareler sessizce
+yok sayilir. `NVIDIA_API_KEY` Supabase Edge Function secret'i olarak eklenmelidir;
+saglik ucu `nvidia_key_configured` ile bunu bildirir.
+
 **Yayın bazen GitHub tarafında düşer.** 6 Ağustos'ta üç gün runner alınamadı.
 Kod tarafı değil; şununla yeniden tetiklenir:
 
