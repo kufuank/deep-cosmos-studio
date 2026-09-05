@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useSettings } from '../lib/settings'
-import { MODELS } from '../lib/anthropic'
+import { MODELS, EFFORTS } from '../lib/anthropic'
+import type { Effort } from '../lib/anthropic'
 import { loadAgentConfig } from '../agents/config'
 import { cardOrder, schemas } from '../schemas'
 import type { CardType } from '../schemas'
 
 export function Settings({ onClose }: { onClose: () => void }) {
-  const { model, setModel } = useSettings()
+  const { model, setModel, effort, setEffort } = useSettings()
   const [versions, setVersions] = useState<Record<string, string> | null>(null)
 
   useEffect(() => {
@@ -44,6 +45,25 @@ export function Settings({ onClose }: { onClose: () => void }) {
               </option>
             ))}
           </select>
+        </div>
+
+        <div>
+          <label className="label">Düşünme derinliği</label>
+          <select
+            className="input"
+            value={effort}
+            onChange={(e) => setEffort(e.target.value as Effort)}
+          >
+            {EFFORTS.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] text-slate-600">
+            {EFFORTS.find((o) => o.id === effort)?.hint} Model her turda kendi kendine düşünür
+            ve bu düşünme çıktı token’ı olarak ücretlendirilir; en büyük maliyet kalemi budur.
+          </p>
         </div>
 
         <div>

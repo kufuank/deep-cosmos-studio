@@ -1,0 +1,67 @@
+<!doctype html><html lang="tr"><head><meta charset="utf-8"><title>Deep Cosmos Faz 3 — Durum Raporu</title>
+<style>
+@page{size:A4;margin:18mm 16mm}
+body{font-family:Arial,Helvetica,sans-serif;font-size:11pt;color:#111;line-height:1.35}
+h1{font-size:18pt;margin:0 0 2pt}
+.sub{color:#555;font-size:9.5pt;margin-bottom:14pt}
+h2{font-size:12.5pt;margin:16pt 0 6pt;border-bottom:1px solid #999;padding-bottom:2pt}
+table{border-collapse:collapse;width:100%;font-size:10pt}
+th,td{border:1px solid #bbb;padding:4pt 6pt;text-align:left;vertical-align:top}
+th{background:#eee}
+td.n{text-align:right;width:40pt}
+.bar{height:12pt;background:#ddd;border:1px solid #999;position:relative;margin:4pt 0 10pt}
+.bar span{display:block;height:100%;background:#2b6cb0}
+.big{font-size:13pt;font-weight:bold}
+ol,ul{margin:4pt 0 4pt 18pt;padding:0}
+li{margin:2pt 0}
+.box{border:1px solid #999;padding:6pt 8pt;background:#f7f7f7;margin-top:8pt}
+.muted{color:#555}
+</style></head><body>
+<h1>Deep Cosmos Faz 3 — Durum Raporu</h1>
+<div class="sub">19 Ağustos 2026 · Uygulama: kufuank.github.io/deep-cosmos-studio · Kaynak belgeler: DEEP COSMOS klasörü</div>
+
+<p><b>Amaç:</b> Hayali gezegenlerde geçen sahte doğa belgeselleri üreten çok ajanlı üretim hattı. Gezegen → Ekosistem → Tür → Mekân → Storyboard → Video Prompt → Render.</p>
+
+<h2>Genel ilerleme</h2>
+<div class="big">%55 / 100</div>
+<div class="bar"><span style="width:55%"></span></div>
+
+<table>
+<tr><th>#</th><th>Aşama</th><th>Durum</th><th>%</th></tr>
+<tr><td>1</td><td>Gezegen ajanı (59 alan)</td><td>Çalışıyor, kullanımda</td><td class="n">100</td></tr>
+<tr><td>2</td><td>Ekosistem ajanı (49 alan)</td><td>Çalışıyor</td><td class="n">100</td></tr>
+<tr><td>3</td><td>Tür ajanı (48 alan)</td><td>Çalışıyor</td><td class="n">100</td></tr>
+<tr><td>4</td><td>Mekân ajanı (31 alan)</td><td>Çalışıyor</td><td class="n">100</td></tr>
+<tr><td>5</td><td>Shot Library (video → kesme ölçümü → 16 kolonlu çözümleme)</td><td>Çalışıyor</td><td class="n">100</td></tr>
+<tr><td>6</td><td>Storyboard ajanı</td><td>Kodu yazıldı, <b>gerçek veriyle hiç çalıştırılmadı</b></td><td class="n">60</td></tr>
+<tr><td>7</td><td>Video Prompt ajanı (doküman 6)</td><td>Yok</td><td class="n">0</td></tr>
+<tr><td>8</td><td>Render hattı (Higgsfield/Seedance, kuyruk, maliyet)</td><td>Yok</td><td class="n">0</td></tr>
+<tr><td>9</td><td>Reference library + uygulama içi görsel üretimi</td><td>Tablolar var, bağlı değil</td><td class="n">10</td></tr>
+<tr><td>—</td><td>Altyapı (giriş, erişim listesi, akış, şifre sıfırlama, kullanım ölçümü, yeniden deneme)</td><td>Sağlam</td><td class="n">95</td></tr>
+</table>
+
+<h2>Son iki oturumda yapılanlar (14 ve 18 Ağustos)</h2>
+<ul>
+<li><b>Boş tur hatası çözüldü:</b> model düşünme bütçesiyle token sınırını tüketiyordu; artık yakalanıp açıklanıyor, bütçe yükseltildi.</li>
+<li><b>Token maliyeti düşürüldü:</b> prompt önbellekleme, “Düşünme derinliği” ayarı (varsayılan orta), sahne JSON sıkıştırma. Her tur <code>dc_usage</code> tablosuna yazılıyor ve sohbetin altında görünüyor.</li>
+<li><b>Overload hatası:</b> Anthropic yoğunken otomatik 3 kez yeniden deneme + anlaşılır Türkçe mesaj.</li>
+</ul>
+
+<h2>Nereden devam edeceğiz — sıra</h2>
+<ol>
+<li><b>Storyboard’ı gerçek veriyle çalıştır ve doğrula.</b> Bir mekân kartının altına storyboard ekle, shot list seç, sekans üret. Kontrol: sahne sayısı ve süreler kaynakla eşleşiyor mu. <span class="muted">Bu yapılmadan 7 ve 8’e geçmek anlamsız.</span></li>
+<li><b>Voice-over çelişkisini karara bağla:</b> Storyboard şablonu her sahneye anlatım istiyor, Video şablonu yasaklıyor. Şu an anlatım üretilip video promptundan dışarıda tutuluyor (ayrı seslendirme katmanı varsayımı). Senin onayın gerekli.</li>
+<li>Storyboard + Video için <b>çekirdek referans belgesi</b> yaz (diğer beşinde var, bunlarda yok).</li>
+<li><b>Video Prompt ajanı</b> (doküman 6).</li>
+<li><b>Render hattı</b> — para harcamaya başlayan aşama, en sona.</li>
+</ol>
+
+<h2>Senin tarafında bekleyenler (Supabase paneli)</h2>
+<ul>
+<li>Site URL hâlâ <code>localhost:3000</code> → kurtarma mailleri çalışmıyor. <i>Authentication → URL Configuration</i>.</li>
+<li>Kayıt herkese açık → <i>Allow new users to sign up</i> kapat.</li>
+<li>Sohbette paylaşılmış 2 anahtarı (1 Supabase, 1 Anthropic) döndür.</li>
+</ul>
+
+<div class="box"><b>Bir sonraki oturumda tek cümle:</b> “Storyboard’ı gerçek shot list’le çalıştıralım.” — DEVAM.md güncel; tüm bunlar orada da yazıyor.</div>
+</body></html>

@@ -9,6 +9,7 @@ export function ChatPanel({
   busy,
   streamText,
   status,
+  lastUsage,
   error,
   locked,
   onSend,
@@ -18,6 +19,7 @@ export function ChatPanel({
   busy: boolean
   streamText: string
   status: string | null
+  lastUsage: string | null
   error: string | null
   locked: boolean
   onSend: (text: string) => void
@@ -87,6 +89,9 @@ export function ChatPanel({
               )}
             </p>
           </div>
+        )}
+        {!busy && lastUsage && (
+          <p className="text-[11px] text-slate-600 nums">{lastUsage}</p>
         )}
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">

@@ -17,6 +17,7 @@ export function CardWorkspace({
   busy,
   streamText,
   status,
+  lastUsage,
   error,
   saving,
   shotLists,
@@ -35,6 +36,7 @@ export function CardWorkspace({
   busy: boolean
   streamText: string
   status: string | null
+  lastUsage: string | null
   error: string | null
   saving: boolean
   onFieldChange: (key: string, value: string) => void
@@ -81,14 +83,23 @@ export function CardWorkspace({
 
           <div className="flex items-center gap-2">
             {sceneCard && (
+              <span className="text-[11px] text-slate-500 nums" title="Ajan, Shot Library'deki tüm listeleri tarayıp sekansı kendisi seçer">
+                {card.shot_list_id && card.sequence_start != null && card.sequence_end != null
+                  ? `Seçilen sekans: ${shotLists.find((l) => l.id === card.shot_list_id)?.title ?? '?'} · plan ${card.sequence_start + 1}–${card.sequence_end + 1}`
+                  : card.shot_list_id
+                    ? `Liste sabitlendi: ${shotLists.find((l) => l.id === card.shot_list_id)?.title ?? '?'} · sekans henüz seçilmedi`
+                    : 'Sekans henüz seçilmedi — ajan tüm kütüphaneyi tarar'}
+              </span>
+            )}
+            {sceneCard && (
               <select
                 className="input py-1 w-auto max-w-[220px] text-xs"
                 value={card.shot_list_id ?? ''}
                 disabled={locked}
                 onChange={(e) => onShotListChange(e.target.value || null)}
-                title="Uyarlanacak referans shot list"
+                title="İsteğe bağlı: ajanı tek bir listeyle sınırlamak için seçin; boş bırakırsanız tüm kütüphane taranır"
               >
-                <option value="">— shot list seçin —</option>
+                <option value="">— tüm kütüphane —</option>
                 {shotLists.map((l) => (
                   <option key={l.id} value={l.id}>
                     {l.title}
@@ -147,6 +158,7 @@ export function CardWorkspace({
             busy={busy}
             streamText={streamText}
             status={status}
+            lastUsage={lastUsage}
             error={error}
             locked={locked}
             onSend={onSend}

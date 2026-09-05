@@ -1,5 +1,5 @@
 import { callAnthropic } from '../lib/anthropic'
-import type { ContentBlock, ToolDef } from '../lib/anthropic'
+import type { ContentBlock, ToolDef, Usage } from '../lib/anthropic'
 import { supabase } from '../lib/supabase'
 import { dataUrlParts, formatTimecode } from '../lib/video'
 import type { DetectedShot } from '../lib/video'
@@ -151,13 +151,19 @@ export async function analyseShot(params: {
   /** Handed to the model so continuity notes can reference what came before. */
   previousSummary?: string
   signal?: AbortSignal
-}): Promise<ShotAnalysis> {
+}): Promise<{ analysis: ShotAnalysis; usage: Usage }> {
   cachedInstructions ??= loadProtocol()
   const inst = await cachedInstructions
 
-  const system = [inst.role, inst.knowledge && `CORE KNOWLEDGE\n${inst.knowledge}`, inst.protocol]
-    .filter(Boolean)
-    .join('\n\n────────────────────\n\n')
+  // One block, cached: every shot of a library run re-reads the same protocol.
+  const system = [
+    {
+      text: [inst.role, inst.knowledge && `CORE KNOWLEDGE\n${inst.knowledge}`, inst.protocol]
+        .filter(Boolean)
+        .join('\n\n────────────────────\n\n'),
+      cache: true,
+    },
+  ]
 
   const { shot } = params
   const duration = shot.endSeconds - shot.startSeconds
@@ -189,7 +195,11 @@ ${shot.frames.length} frames follow, sampled in chronological order from inside 
     system,
     messages: [{ role: 'user', content }],
     tools: [recordShotTool],
-    maxTokens: 2000,
+    // Perception, not reasoning: low effort keeps thinking spend small. The
+    // cap still has to hold thinking + the 15-field tool call — 2000 was
+    // enough before thinking was on by default, not any more.
+    effort: 'low',
+    maxTokens: 6000,
     signal: params.signal,
   })
 
@@ -209,7 +219,7 @@ ${shot.frames.length} frames follow, sampled in chronological order from inside 
   }
   // The protocol forbids inventing audio observations from silent frames.
   if (!out.audio_notes) out.audio_notes = 'Cannot be determined (no audio supplied)'
-  return out
+  return { analysis: out, usage: res.usage }
 }
 
 export function shotSummary(a: ShotAnalysis): string {

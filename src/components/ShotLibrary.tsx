@@ -5,6 +5,7 @@ import type { ShotListRow, ShotRow } from '../lib/supabase'
 import { detectShots, formatTimecode, loadVideo, reviewDetection } from '../lib/video'
 import type { DetectedShot, DetectionReport } from '../lib/video'
 import { analyseShot, shotSummary } from '../agents/deconstruct'
+import { recordUsage } from '../lib/usage'
 import { useSettings } from '../lib/settings'
 import { describeError, isAbort } from '../lib/errors'
 import { ShotTable } from './ShotTable'
@@ -135,13 +136,14 @@ export function ShotLibrary({ session }: { session: Session }) {
         if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
         setProgress({ label: 'Planlar çözümleniyor', done: i, total: detected.length })
         const d = detected[i]
-        const analysis = await analyseShot({
+        const { analysis, usage } = await analyseShot({
           model,
           shot: d,
           totalShots: detected.length,
           previousSummary: previous,
           signal: controller.signal,
         })
+        recordUsage({ kind: 'shot_analysis', agent: 'deconstruction', model, effort: 'low', requests: 1, usage })
         previous = shotSummary(analysis)
 
         const { data: row, error: insErr } = await supabase

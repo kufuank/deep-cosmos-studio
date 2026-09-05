@@ -7,10 +7,34 @@ import { supabase } from './supabase'
  * ever forwards the caller's own Supabase session token.
  */
 
+/**
+ * The edge function speaks the Anthropic shape for every entry here; NVIDIA
+ * models are translated server-side, so nothing in the client changes when one
+ * is selected. NVIDIA NIM is free but rate limited to roughly 40 requests per
+ * minute across the whole key.
+ */
 export const MODELS = [
   { id: 'claude-sonnet-5', label: 'Sonnet 5 — hızlı, günlük kullanım' },
   { id: 'claude-opus-5', label: 'Opus 5 — daha derin akıl yürütme' },
+  {
+    id: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+    label: 'NVIDIA · Nemotron Super 49B — ücretsiz, metin',
+  },
+  {
+    id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+    label: 'NVIDIA · Nemotron Ultra 253B — ücretsiz, metin',
+  },
+  { id: 'deepseek-ai/deepseek-v3.1', label: 'NVIDIA · DeepSeek V3.1 — ücretsiz, metin' },
+  {
+    id: 'nvidia/llama-3.1-nemotron-nano-vl-8b-v1',
+    label: 'NVIDIA · Nemotron Nano VL 8B — ücretsiz, görsel',
+  },
 ] as const
+
+/** Only the vision model can read Shot Library frames. */
+export function supportsVision(model: string): boolean {
+  return model.startsWith('claude-') || model.includes('-vl-')
+}
 
 export interface ToolDef {
   name: string
@@ -22,6 +46,13 @@ export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; tool_use_id: string; content: string }
+  // Claude Sonnet 5 / Opus 5 think by default even when the request carries no
+  // thinking parameter. The blocks must be captured — both so the turn is not
+  // mistaken for empty, and so they can be echoed back unchanged in the tool
+  // loop. With the default display they arrive with empty text but still
+  // consume output tokens.
+  | { type: 'thinking'; thinking: string; signature: string }
+  | { type: 'redacted_thinking'; data: string }
   | {
       type: 'image'
       source: { type: 'base64'; media_type: string; data: string }
@@ -32,24 +63,121 @@ export interface ApiMessage {
   content: string | ContentBlock[]
 }
 
+/**
+ * A system prompt block. Marking a block `cache: true` places a prompt-cache
+ * breakpoint after it: everything up to and including that block (tools render
+ * first, then system) is served from cache on the next request at ~10% of the
+ * input price. Caching is a prefix match, so stable content must come first and
+ * anything that changes per turn must follow the last cached block.
+ */
+export interface SystemBlock {
+  text: string
+  cache?: boolean
+}
+
+/** Thinking depth. Thinking is billed as output tokens, so this is the main cost dial. */
+export type Effort = 'low' | 'medium' | 'high'
+export const EFFORTS: { id: Effort; label: string; hint: string }[] = [
+  { id: 'low', label: 'Düşük — hızlı ve ucuz', hint: 'Kısa sohbet turları, tek alan düzeltmeleri.' },
+  { id: 'medium', label: 'Orta — önerilen', hint: 'Alan doldurma ve çıkarım için yeterli derinlik, makul maliyet.' },
+  { id: 'high', label: 'Yüksek — en derin', hint: 'Zor fizik/biyoloji tutarlılık sorularında; birkaç kat daha pahalı.' },
+]
+
 export interface CallOptions {
   model: string
-  system: string
+  /** A plain string is sent as-is; blocks enable prompt caching. */
+  system: string | SystemBlock[]
   messages: ApiMessage[]
   tools?: ToolDef[]
   maxTokens?: number
+  effort?: Effort
+  /**
+   * Also cache the conversation so far. Within a multi-request agent turn the
+   * second and later requests then re-read the whole history from cache
+   * instead of re-billing it in full.
+   */
+  cacheMessages?: boolean
   signal?: AbortSignal
+}
+
+/** Token accounting for one request, straight from the API's usage fields. */
+export interface Usage {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
+
+export const EMPTY_USAGE: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+
+export function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+  }
 }
 
 export interface CallResult {
   content: ContentBlock[]
   stopReason: string | null
+  usage: Usage
+}
+
+/**
+ * Builds the wire-format request body. Shared by both transports so the cache
+ * breakpoints, effort and limits are identical whether or not we stream.
+ */
+export function buildRequestBody(opts: CallOptions, stream: boolean): Record<string, unknown> {
+  const system =
+    typeof opts.system === 'string'
+      ? opts.system
+      : opts.system
+          .filter((b) => b.text.trim())
+          .map((b) => ({
+            type: 'text',
+            text: b.text,
+            ...(b.cache ? { cache_control: { type: 'ephemeral' } } : {}),
+          }))
+
+  let messages: unknown[] = opts.messages
+  if (opts.cacheMessages && opts.messages.length) {
+    // Breakpoint on the last block of the last message: the whole conversation
+    // prefix becomes cache-readable for the next request in this turn.
+    const last = opts.messages[opts.messages.length - 1]
+    const blocks: unknown[] =
+      typeof last.content === 'string'
+        ? [{ type: 'text', text: last.content }]
+        : last.content.map((b) => ({ ...b }))
+    if (blocks.length) {
+      const tail = blocks[blocks.length - 1] as Record<string, unknown>
+      blocks[blocks.length - 1] = { ...tail, cache_control: { type: 'ephemeral' } }
+      messages = [...opts.messages.slice(0, -1), { role: last.role, content: blocks }]
+    }
+  }
+
+  return {
+    model: opts.model,
+    // max_tokens caps thinking + visible output combined. The model thinks by
+    // default, and a hard sheet can burn 8k tokens of thinking alone — a low
+    // cap ends the turn at stop_reason "max_tokens" before any field is
+    // written. 24000 leaves room for thinking plus a large batched tool call.
+    max_tokens: opts.maxTokens ?? 24000,
+    system,
+    messages,
+    ...(opts.effort ? { output_config: { effort: opts.effort } } : {}),
+    ...(opts.tools?.length ? { tools: opts.tools } : {}),
+    ...(stream ? { stream: true } : {}),
+  }
 }
 
 export class AnthropicError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    /** Anthropic's error type, e.g. 'overloaded_error', when known. */
+    readonly kind?: string,
   ) {
     super(message)
     this.name = 'AnthropicError'
@@ -62,7 +190,24 @@ function functionUrl(): string {
   return `${base}/functions/v1/anthropic`
 }
 
-export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
+/** Blocking variant with the same transient-failure retry as the stream. */
+export async function callAnthropic(
+  opts: CallOptions & { onRetry?: (attempt: number, waitMs: number) => void },
+): Promise<CallResult> {
+  let attempt = 0
+  for (;;) {
+    try {
+      return await callOnce(opts)
+    } catch (e) {
+      if (!isTransient(e) || attempt >= RETRY_DELAYS_MS.length) throw e
+      const wait = RETRY_DELAYS_MS[attempt++]
+      opts.onRetry?.(attempt, wait)
+      await sleep(wait, opts.signal)
+    }
+  }
+}
+
+async function callOnce(opts: CallOptions): Promise<CallResult> {
   const { data } = await supabase.auth.getSession()
   const token = data.session?.access_token
   if (!token) {
@@ -78,13 +223,7 @@ export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
         authorization: `Bearer ${token}`,
       },
       signal: opts.signal,
-      body: JSON.stringify({
-        model: opts.model,
-        max_tokens: opts.maxTokens ?? 8000,
-        system: opts.system,
-        messages: opts.messages,
-        ...(opts.tools?.length ? { tools: opts.tools } : {}),
-      }),
+      body: JSON.stringify(buildRequestBody(opts, false)),
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw e
@@ -93,9 +232,11 @@ export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
 
   if (!res.ok) {
     let detail = ''
+    let kind: string | undefined
     try {
-      const body = (await res.json()) as { error?: string | { message?: string } }
+      const body = (await res.json()) as { error?: string | { message?: string; type?: string } }
       detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '')
+      kind = typeof body.error === 'object' ? body.error?.type : undefined
     } catch {
       detail = ''
     }
@@ -105,11 +246,27 @@ export async function callAnthropic(opts: CallOptions): Promise<CallResult> {
     if (res.status === 429) {
       throw new AnthropicError('Hız sınırına takıldınız. Biraz bekleyip tekrar deneyin.', 429)
     }
-    throw new AnthropicError(detail || `Sunucu hatası (${res.status})`, res.status)
+    if (res.status === 529 || kind === 'overloaded_error') {
+      throw new AnthropicError(OVERLOADED_MESSAGE, 529, 'overloaded_error')
+    }
+    throw new AnthropicError(detail || `Sunucu hatası (${res.status})`, res.status, kind)
   }
 
-  const body = (await res.json()) as { content: ContentBlock[]; stop_reason: string | null }
-  return { content: body.content ?? [], stopReason: body.stop_reason }
+  const body = (await res.json()) as {
+    content: ContentBlock[]
+    stop_reason: string | null
+    usage?: Record<string, number>
+  }
+  return { content: body.content ?? [], stopReason: body.stop_reason, usage: readUsage(body.usage) }
+}
+
+function readUsage(u: Record<string, number> | undefined): Usage {
+  return {
+    input: u?.input_tokens ?? 0,
+    output: u?.output_tokens ?? 0,
+    cacheRead: u?.cache_read_input_tokens ?? 0,
+    cacheWrite: u?.cache_creation_input_tokens ?? 0,
+  }
 }
 
 export interface StreamHandlers {
@@ -117,16 +274,73 @@ export interface StreamHandlers {
   onText?: (delta: string) => void
   /** Fired once the model commits to a tool call, before its input is complete. */
   onToolStart?: (name: string) => void
+  /** Fired when a thinking block opens — nothing visible streams during it. */
+  onThinking?: () => void
+  /** Fired before a retry of a transient upstream failure. */
+  onRetry?: (attempt: number, waitMs: number) => void
+}
+
+/**
+ * Errors worth retrying: Anthropic capacity/transient failures. Anything else
+ * (auth, validation, our own edge function refusing) is surfaced immediately.
+ */
+export function isTransient(e: unknown): boolean {
+  if (!(e instanceof AnthropicError)) return false
+  if (e.status === 529 || e.status === 500 || e.status === 502 || e.status === 503) return true
+  return e.kind === 'overloaded_error' || e.kind === 'api_error'
+}
+
+const RETRY_DELAYS_MS = [2000, 5000, 12000]
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(t)
+        reject(new DOMException('aborted', 'AbortError'))
+      },
+      { once: true },
+    )
+  })
 }
 
 /**
  * Same call, streamed. A full agent turn regularly runs past a minute, so the
  * blocking form leaves the user staring at a spinner; this surfaces tokens as
  * they arrive and reconstructs the same content blocks at the end.
+ *
+ * Retries transient upstream failures. Under load Anthropic opens the stream
+ * with HTTP 200 and then writes an `error` event (overloaded_error) a few
+ * seconds in — so the retry has to wrap the whole read, not just the fetch.
+ * A retry only happens while nothing user-visible has streamed yet; once text
+ * is on screen a retry would duplicate it, so the error is surfaced instead.
  */
 export async function streamAnthropic(
   opts: CallOptions & StreamHandlers,
 ): Promise<CallResult> {
+  let attempt = 0
+  for (;;) {
+    let textStreamed = false
+    try {
+      return await streamOnce({
+        ...opts,
+        onText: (d) => {
+          textStreamed = true
+          opts.onText?.(d)
+        },
+      })
+    } catch (e) {
+      if (textStreamed || !isTransient(e) || attempt >= RETRY_DELAYS_MS.length) throw e
+      const wait = RETRY_DELAYS_MS[attempt++]
+      opts.onRetry?.(attempt, wait)
+      await sleep(wait, opts.signal)
+    }
+  }
+}
+
+async function streamOnce(opts: CallOptions & StreamHandlers): Promise<CallResult> {
   const { data } = await supabase.auth.getSession()
   const token = data.session?.access_token
   if (!token) {
@@ -139,14 +353,7 @@ export async function streamAnthropic(
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
       signal: opts.signal,
-      body: JSON.stringify({
-        model: opts.model,
-        max_tokens: opts.maxTokens ?? 8000,
-        system: opts.system,
-        messages: opts.messages,
-        stream: true,
-        ...(opts.tools?.length ? { tools: opts.tools } : {}),
-      }),
+      body: JSON.stringify(buildRequestBody(opts, true)),
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') throw e
@@ -155,9 +362,13 @@ export async function streamAnthropic(
 
   if (!res.ok || !res.body) {
     let detail = ''
+    let kind: string | undefined
     try {
-      const body = (await res.json()) as { error?: string | { message?: string } }
+      const body = (await res.json()) as {
+        error?: string | { message?: string; type?: string }
+      }
       detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '')
+      kind = typeof body.error === 'object' ? body.error?.type : undefined
     } catch {
       /* fall through to the status-based message */
     }
@@ -167,7 +378,10 @@ export async function streamAnthropic(
     if (res.status === 429) {
       throw new AnthropicError('Hız sınırına takıldınız. Biraz bekleyip tekrar deneyin.', 429)
     }
-    throw new AnthropicError(detail || `Sunucu hatası (${res.status})`, res.status)
+    if (res.status === 529 || kind === 'overloaded_error') {
+      throw new AnthropicError(OVERLOADED_MESSAGE, 529, 'overloaded_error')
+    }
+    throw new AnthropicError(detail || `Sunucu hatası (${res.status})`, res.status, kind)
   }
 
   const acc = createStreamAccumulator(opts)
@@ -182,6 +396,9 @@ export async function streamAnthropic(
   return acc.finish()
 }
 
+export const OVERLOADED_MESSAGE =
+  'Anthropic sunucuları şu an aşırı yüklü (overloaded). Otomatik olarak birkaç kez yeniden denendi ama yer açılmadı — bir-iki dakika sonra tekrar deneyin. Bu bir uygulama hatası değil, sağlayıcı tarafında kapasite sorunu.'
+
 /**
  * Reassembles Anthropic's SSE events into content blocks.
  *
@@ -193,6 +410,7 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
   const blocks: ContentBlock[] = []
   const partialJson: Record<number, string> = {}
   let stopReason: string | null = null
+  let usage: Usage = { ...EMPTY_USAGE }
   let buffer = ''
 
   function handleEvent(raw: string) {
@@ -223,6 +441,15 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
           }
           partialJson[i] = ''
           handlers.onToolStart?.(evt.content_block.name)
+        } else if (evt.content_block?.type === 'thinking') {
+          // Dropping these once made a whole turn look empty: the model spent
+          // its entire token budget thinking, and the client saw no blocks at
+          // all. They must be kept so the turn can be judged and echoed back.
+          blocks[i] = { type: 'thinking', thinking: '', signature: '' }
+          handlers.onThinking?.()
+        } else if (evt.content_block?.type === 'redacted_thinking') {
+          blocks[i] = { type: 'redacted_thinking', data: evt.content_block.data ?? '' }
+          handlers.onThinking?.()
         }
         break
       }
@@ -236,6 +463,14 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
           }
         } else if (evt.delta?.type === 'input_json_delta') {
           partialJson[i] = (partialJson[i] ?? '') + (evt.delta.partial_json ?? '')
+        } else if (evt.delta?.type === 'thinking_delta') {
+          const b = blocks[i]
+          if (b?.type === 'thinking') b.thinking += evt.delta.thinking ?? ''
+        } else if (evt.delta?.type === 'signature_delta') {
+          // The signature must survive byte-for-byte — the API rejects echoed
+          // thinking blocks whose content or signature was altered.
+          const b = blocks[i]
+          if (b?.type === 'thinking') b.signature += evt.delta.signature ?? ''
         }
         break
       }
@@ -252,11 +487,31 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
         }
         break
       }
+      case 'message_start': {
+        // Input-side accounting arrives up front; cache_read tells us whether
+        // the prompt-cache breakpoints are actually landing.
+        const u = evt.message?.usage as Record<string, number> | undefined
+        if (u) usage = { ...usage, ...readUsage(u), output: usage.output }
+        break
+      }
       case 'message_delta':
         stopReason = evt.delta?.stop_reason ?? stopReason
+        // Output count is cumulative in message_delta — thinking included.
+        if (typeof evt.usage?.output_tokens === 'number') usage.output = evt.usage.output_tokens
         break
-      case 'error':
-        throw new AnthropicError(evt.error?.message ?? 'Akış sırasında hata oluştu.')
+      case 'error': {
+        // Under load the API returns 200, opens the stream, and then writes
+        // this event instead of content. Classify it so the caller can retry.
+        const kind = evt.error?.type as string | undefined
+        if (kind === 'overloaded_error') {
+          throw new AnthropicError(OVERLOADED_MESSAGE, 529, kind)
+        }
+        throw new AnthropicError(
+          evt.error?.message ?? 'Akış sırasında hata oluştu.',
+          kind === 'api_error' ? 500 : undefined,
+          kind,
+        )
+      }
     }
   }
 
@@ -273,7 +528,7 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
     finish(): CallResult {
       if (buffer.trim()) handleEvent(buffer)
       buffer = ''
-      return { content: blocks.filter(Boolean), stopReason }
+      return { content: blocks.filter(Boolean), stopReason, usage }
     },
   }
 }

@@ -30,9 +30,12 @@ export interface CardRow {
   parent_id: string | null
   title: string
   fields: CardFields
-  /** Storyboard only: the ordered scene list and the shot list it adapts. */
+  /** Storyboard only: the ordered scene list and the sequence it adapts —
+   *  a shot list plus an inclusive range of shot ordinals within it. */
   scenes: Scene[]
   shot_list_id: string | null
+  sequence_start: number | null
+  sequence_end: number | null
   status: 'draft' | 'locked'
   locked_at: string | null
   created_at: string

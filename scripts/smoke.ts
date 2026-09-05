@@ -5,13 +5,29 @@
 import { schemas, cardOrder, allFields, isSceneCard, SCENE_FIELDS } from '../src/schemas'
 import type { CardFields, CardType, Scene } from '../src/schemas'
 import { buildPrompts, sceneVideoPrompt } from '../src/lib/prompt'
-import { buildSystemPrompt, applyUpdates } from '../src/agents/runner'
+import {
+  buildSystemPrompt,
+  buildSystemBlocks,
+  applyUpdates,
+  setFieldsTool,
+  libraryBlock,
+  selectedSequenceBlock,
+  selectSequenceTool,
+} from '../src/agents/runner'
+import type { ShotContext, LibraryList } from '../src/agents/runner'
+import { buildRequestBody, isTransient, AnthropicError } from '../src/lib/anthropic'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
 import { formatTimecode, dataUrlParts, findCutIndices } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
 import { createStreamAccumulator } from '../src/lib/anthropic'
 import { describeError, isAbort } from '../src/lib/errors'
+import {
+  providerFor,
+  toOpenAIMessages,
+  toOpenAIRequest,
+  createOpenAIToAnthropic,
+} from '../supabase/functions/anthropic/bridge'
 
 /** Stands in for the database-backed config, using the transcribed constants. */
 function cfg(type: CardType): AgentConfig {
@@ -127,6 +143,57 @@ check('shows resolved values with state', partial.includes('(confirmed) = TEST_S
 const emptySys = buildSystemPrompt('planet', {}, {}, cfg('planet'))
 check('root card has no inherited block', !emptySys.includes('INHERITED CONSTRAINTS'))
 check('root card lists all fields missing', (emptySys.match(/— MISSING —/g) ?? []).length === total)
+
+console.log('\n== prompt caching ==')
+{
+  // The stable half (role, knowledge, protocol, inherited constraints) must be
+  // byte-identical across turns while fields change, or the cache never hits.
+  const a = buildSystemBlocks('species', fill('species', 5), { planet: planetFields }, cfg('species'))
+  const b = buildSystemBlocks('species', fill('species', 30), { planet: planetFields }, cfg('species'))
+  check('two blocks: stable + dynamic', a.length === 2 && b.length === 2)
+  check('stable block is cached', a[0].cache === true && !a[1].cache)
+  check('stable block unchanged when fields change', a[0].text === b[0].text)
+  check('dynamic block carries the sheet state', b[1].text.includes('CURRENT SHEET STATE'))
+  check('sheet state is not in the cached half', !a[0].text.includes('CURRENT SHEET STATE'))
+  check(
+    'stable half is large enough to cache (>=1024 tokens ≈ 4k chars)',
+    a[0].text.length > 4000,
+    String(a[0].text.length),
+  )
+  // Locking must not perturb the cached prefix either.
+  const l = buildSystemBlocks('species', fill('species', 5), { planet: planetFields }, cfg('species'), { locked: true })
+  check('lock notice lives in the dynamic half', l[0].text === a[0].text && l[1].text.includes('LOCKED'))
+
+  const body = buildRequestBody(
+    {
+      model: 'claude-sonnet-5',
+      system: a,
+      messages: [
+        { role: 'user', content: 'merhaba' },
+        { role: 'assistant', content: [{ type: 'text', text: 'selam' }] },
+        { role: 'user', content: 'devam' },
+      ],
+      effort: 'medium',
+      cacheMessages: true,
+    },
+    true,
+  ) as any
+  check('system sent as blocks', Array.isArray(body.system) && body.system.length === 2)
+  check('cache_control on stable system block', body.system[0].cache_control?.type === 'ephemeral')
+  check('no cache_control on dynamic block', !body.system[1].cache_control)
+  const lastMsg = body.messages[2]
+  check(
+    'last message converted to blocks with breakpoint',
+    Array.isArray(lastMsg.content) && lastMsg.content[0].cache_control?.type === 'ephemeral',
+  )
+  check('earlier messages untouched', body.messages[0].content === 'merhaba')
+  check('effort forwarded in output_config', body.output_config?.effort === 'medium')
+  check('stream flag set', body.stream === true)
+  check('max_tokens default 24000', body.max_tokens === 24000)
+  const plain = buildRequestBody({ model: 'm', system: 'x', messages: [{ role: 'user', content: 'y' }] }, false) as any
+  check('string system passes through', plain.system === 'x')
+  check('no effort → no output_config', !('output_config' in plain))
+}
 
 console.log('\n== applyUpdates ==')
 const applied = applyUpdates(
@@ -279,6 +346,90 @@ console.log('\n== stream accumulator ==')
 }
 
 {
+  // Regression: the empty-turn bug of 14 Aug 2026. The model thinks by default
+  // and max_tokens caps thinking + output together, so a hard request can spend
+  // the whole budget thinking and end at stop_reason "max_tokens" with nothing
+  // but thinking blocks. The old accumulator ignored those blocks entirely, so
+  // the turn looked empty and the UI blamed the card lock.
+  const events = [
+    { type: 'message_start', message: { id: 'm2' } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+    // display defaults to "omitted": thinking deltas may never arrive, or carry
+    // empty text — the block itself must still be captured.
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'sig-abc' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'max_tokens' } },
+    { type: 'message_stop' },
+  ]
+  const wire = events.map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('')
+  let thinkingSeen = 0
+  const acc = createStreamAccumulator({ onThinking: () => thinkingSeen++ })
+  for (let i = 0; i < wire.length; i += 11) acc.push(wire.slice(i, i + 11))
+  const r = acc.finish()
+  const b = r.content[0]
+  check('thinking-only turn is not empty', r.content.length === 1, String(r.content.length))
+  check('thinking block captured', b?.type === 'thinking', JSON.stringify(b))
+  check('signature preserved verbatim', b?.type === 'thinking' && b.signature === 'sig-abc')
+  check('onThinking fired once', thinkingSeen === 1, String(thinkingSeen))
+  check('max_tokens stop reason surfaces', r.stopReason === 'max_tokens', String(r.stopReason))
+}
+
+{
+  // Thinking text, when the display setting does return it, accumulates.
+  const acc = createStreamAccumulator()
+  const push = (e: unknown) => acc.push('data: ' + JSON.stringify(e) + '\n\n')
+  push({ type: 'content_block_start', index: 0, content_block: { type: 'thinking' } })
+  push({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'yörünge ' } })
+  push({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'hızı' } })
+  push({ type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } })
+  push({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Cevap.' } })
+  const r = acc.finish()
+  const think = r.content.find((b) => b.type === 'thinking')
+  check(
+    'thinking text accumulates across deltas',
+    think?.type === 'thinking' && think.thinking === 'yörünge hızı',
+  )
+  const txt = r.content.find((b) => b.type === 'text')
+  check('text after thinking still parsed', txt?.type === 'text' && txt.text === 'Cevap.')
+}
+
+{
+  // 18 Aug 2026: under load Anthropic answers 200, opens the stream, then
+  // writes an `error` event instead of content. That must surface as a
+  // retryable overloaded error, not a generic stream failure.
+  const acc = createStreamAccumulator()
+  acc.push('data: ' + JSON.stringify({ type: 'message_start', message: { id: 'm3', usage: { input_tokens: 5 } } }) + '\n\n')
+  let caught: unknown = null
+  try {
+    acc.push(
+      'data: ' +
+        JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'Overloaded' } }) +
+        '\n\n',
+    )
+  } catch (e) {
+    caught = e
+  }
+  check('in-stream overload throws AnthropicError', caught instanceof AnthropicError)
+  check(
+    'overload is classified transient',
+    caught instanceof AnthropicError && caught.kind === 'overloaded_error' && isTransient(caught),
+  )
+  check(
+    'overload message is Turkish and actionable',
+    caught instanceof AnthropicError && caught.message.includes('aşırı yüklü'),
+  )
+  check('auth errors are not retried', !isTransient(new AnthropicError('x', 401)))
+  check('validation errors are not retried', !isTransient(new AnthropicError('x', 400)))
+  check('529 status is retried', isTransient(new AnthropicError('x', 529)))
+}
+
+check(
+  'set_fields warns against oversized single calls',
+  setFieldsTool.description.includes('at most 15 fields'),
+)
+
+{
   // Garbage on the wire should be skipped, not fatal.
   const acc = createStreamAccumulator()
   acc.push('data: not-json\n\n')
@@ -330,8 +481,17 @@ console.log('\n== storyboard ==')
   check('three storyboard prompts', sb.length === 3, String(sb.length))
 
   const board = sb.find((p) => p.kind === 'sheet')!
-  check('board states the frame count', board.text.includes('containing 2 storyboard frames'))
-  check('board lists every frame', board.text.includes('FRAME 01') && board.text.includes('FRAME 02'))
+  check('board states the frame count', board.text.includes('containing **2** storyboard frames'))
+  check('board follows the template opener', board.text.includes('during its natural daily life inside'))
+  check('board lists every scene block', board.text.includes('SCENE 01') && board.text.includes('SCENE 02'))
+  // Master prompt template: every scene carries all eight fields. A frame line
+  // with only timestamp + description dropped the camera language (Mete, 19 Aug).
+  for (const label of ['Timestamp:', 'Scene Description', 'Camera Angle', 'Shot Type', 'Camera Movement', 'Visual Prompt', 'Audio', 'Voice-over']) {
+    check(`board scene block has "${label}"`, (board.text.match(new RegExp(`^${label.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}$`, 'gm')) ?? []).length === 2)
+  }
+  check('board carries scene camera values', board.text.includes('Slow pan right') && board.text.includes('Low Angle'))
+  check('board carries the voice-over', board.text.includes('At first light the basin stirs.'))
+  check('board ends with the OUTPUT list', board.text.trim().endsWith('AAA film pre-production'))
   check('board carries planet constraint', board.text.includes('TEST_PLANET_NAME'))
 
   const seq = sb.find((p) => p.kind === 'video')!
@@ -362,6 +522,65 @@ console.log('\n== storyboard ==')
   check('storyboard follows location', schemas.storyboard.parent === 'location')
   check('storyboard is a scene card', isSceneCard('storyboard') && !isSceneCard('planet'))
   check('scene contract has 10 fields', SCENE_FIELDS.length === 10, String(SCENE_FIELDS.length))
+}
+
+console.log('\n== shot library index ==')
+{
+  // The agent must see the WHOLE library and may pick a window anywhere in any
+  // list — "always the first 15 seconds of the chosen list" was the bug.
+  const mk = (list: string, i: number, t0: number, t1: number, subj: string): ShotContext => ({
+    shot_list_id: list,
+    ordinal: i,
+    start_seconds: t0,
+    end_seconds: t1,
+    timecode_start: `00:00:${String(t0).padStart(2, '0')}.000`,
+    timecode_end: `00:00:${String(t1).padStart(2, '0')}.000`,
+    shot_type: 'Wide',
+    camera_angle: 'High Angle',
+    camera_movement: 'Static',
+    lens: '24mm',
+    dof: 'Deep',
+    main_subject: subj,
+    primary_action: `${subj} acts`,
+    foreground: '',
+    background: 'plain',
+    composition: 'Thirds',
+    lighting: 'Overcast',
+    camera_purpose: 'Establish',
+    continuity_notes: '',
+    technical_notes: '',
+  })
+  const lists: LibraryList[] = [
+    { id: 'L1', title: 'Arctic lead', duration_seconds: 9 },
+    { id: 'L2', title: 'Reef dusk', duration_seconds: 6 },
+  ]
+  const shots = [
+    mk('L1', 0, 0, 3, 'ice'), mk('L1', 1, 3, 6, 'seal'), mk('L1', 2, 6, 9, 'seal dives'),
+    mk('L2', 0, 0, 2, 'coral'), mk('L2', 1, 2, 4, 'fish'), mk('L2', 2, 4, 6, 'shark'),
+  ]
+  const idx = libraryBlock(lists, shots)
+  check('index names every list', idx.includes('LIST "Arctic lead"') && idx.includes('LIST "Reef dusk"'))
+  check('index carries list ids for select_sequence', idx.includes('shot_list_id: L1') && idx.includes('shot_list_id: L2'))
+  check('index lists every shot', (idx.match(/^ {2} +\d+ \| /gm) ?? []).length === 6)
+  check('index says the opening is not privileged', idx.includes('not privileged'))
+  check('index is compact (one line per shot)', !idx.includes('Lens:'))
+  check('empty library is honest', libraryBlock([], []).includes('library is empty'))
+
+  const none = selectedSequenceBlock(null, lists, shots)
+  check('no selection blocks scene writing', none.includes('None yet'))
+  const mid = selectedSequenceBlock({ shot_list_id: 'L2', start: 1, end: 2 }, lists, shots)
+  check('selection can sit mid-list, not at its start', mid.includes('shots 2–3') && !mid.includes('coral'))
+  check('selected block carries full detail', mid.includes('Lens: 24mm') && mid.includes('fish') && mid.includes('shark'))
+  check('selected block states total duration', mid.includes('4.00s, 2 shots'))
+  check('stale selection is flagged', selectedSequenceBlock({ shot_list_id: 'L9', start: 0, end: 1 }, lists, shots).includes('no longer matches'))
+
+  // The index is stable across turns → cached half; the selection is dynamic.
+  const blocks = buildSystemBlocks('storyboard', {}, {}, cfg('storyboard'), { lists, shots, selection: { shot_list_id: 'L1', start: 1, end: 2 } })
+  check('library index lives in the cached half', blocks[0].text.includes('PRODUCTION SHOT LIBRARY — INDEX'))
+  check('selected sequence lives in the dynamic half', blocks[1].text.includes('SELECTED SEQUENCE — list "Arctic lead"'))
+  check('select_sequence requires a rationale', (selectSequenceTool.input_schema as any).required.includes('rationale'))
+  check('protocol demands a whole-library search', protocolText('storyboard').includes('Search the WHOLE library'))
+  check('protocol names select_sequence', protocolText('storyboard').includes('select_sequence'))
 }
 
 console.log('\n== locked cards ==')
@@ -537,6 +756,140 @@ console.log('\n== multi-row insert shape ==')
     'no row omits a NOT NULL column',
     rows.every((r) => Array.isArray(r.wrote)),
   )
+}
+
+console.log('\n== nvidia bridge: request translation ==')
+{
+  const req = {
+    model: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+    system: [
+      { type: 'text', text: 'STABLE HALF', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'VARIABLE HALF' },
+    ],
+    messages: [
+      { role: 'user', content: 'merhaba' },
+      {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'yazıyorum' },
+          { type: 'tool_use', id: 'tu_1', name: 'set_fields', input: { updates: [{ key: 'mass' }] } },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'tool_result', tool_use_id: 'tu_1', content: 'Wrote 1 field(s).' },
+          { type: 'text', text: 'devam' },
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' },
+          },
+        ],
+      },
+    ],
+    tools: [
+      { name: 'set_fields', description: 'writes', input_schema: { type: 'object', properties: {} } },
+    ],
+    stream: true,
+  }
+
+  check('claude ids route to anthropic', providerFor('claude-opus-5') === 'anthropic')
+  check('other ids route to nvidia', providerFor('nvidia/llama-3.3-nemotron-super-49b-v1.5') === 'nvidia')
+
+  const msgs = toOpenAIMessages(req) as any[]
+  check('cached system halves collapse into one message', msgs[0].role === 'system')
+  check(
+    'both halves survive the collapse',
+    msgs[0].content.includes('STABLE HALF') && msgs[0].content.includes('VARIABLE HALF'),
+  )
+
+  const asst = msgs.find((m) => m.role === 'assistant')
+  check('tool_use becomes an OpenAI tool_call', asst?.tool_calls?.[0]?.function?.name === 'set_fields')
+  check(
+    'tool arguments are serialised as a JSON string',
+    typeof asst?.tool_calls?.[0]?.function?.arguments === 'string' &&
+      JSON.parse(asst.tool_calls[0].function.arguments).updates[0].key === 'mass',
+  )
+
+  // The fan-out that actually differs between the two formats.
+  const toolMsg = msgs.find((m) => m.role === 'tool')
+  check('tool_result becomes its own tool message', toolMsg?.tool_call_id === 'tu_1')
+  check(
+    'tool message precedes the remaining user content',
+    msgs.indexOf(toolMsg) < msgs.lastIndexOf(msgs.filter((m) => m.role === 'user').pop()),
+  )
+
+  const lastUser = msgs.filter((m) => m.role === 'user').pop() as any
+  const img = lastUser.content.find((c: any) => c.type === 'image_url')
+  check('image becomes a data URL', img?.image_url?.url === 'data:image/jpeg;base64,QUJD')
+
+  const body = toOpenAIRequest(req, 24000) as any
+  check('tools become OpenAI functions', body.tools[0].function.name === 'set_fields')
+  check('schema is carried over as parameters', body.tools[0].function.parameters.type === 'object')
+  check('usage is requested so cost stays measurable', body.stream_options?.include_usage === true)
+}
+
+console.log('\n== nvidia bridge: stream round-trip ==')
+{
+  // The real proof: an OpenAI stream, rewritten by the bridge, must parse in the
+  // client's own accumulator and produce the same blocks Anthropic would.
+  const chunks = [
+    { choices: [{ index: 0, delta: { content: 'Gezegeni ' } }] },
+    { choices: [{ index: 0, delta: { content: 'kuruyorum.' } }] },
+    {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, id: 'call_a', function: { name: 'set_fields', arguments: '{"updates":[{"key":"planet_' } },
+            ],
+          },
+        },
+      ],
+    },
+    {
+      choices: [
+        {
+          index: 0,
+          delta: {
+            tool_calls: [
+              { index: 0, function: { arguments: 'name","value":"Vesper","state":"confirmed"}]}' } },
+            ],
+          },
+        },
+      ],
+    },
+    { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
+    { usage: { prompt_tokens: 1234, completion_tokens: 567 }, choices: [] },
+  ]
+  const wire = chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join('') + 'data: [DONE]\n\n'
+
+  const bridge = createOpenAIToAnthropic()
+  let anthropicWire = ''
+  // Feed in awkward slices so event boundaries land mid-chunk, as on a real socket.
+  for (let i = 0; i < wire.length; i += 11) anthropicWire += bridge.push(wire.slice(i, i + 11))
+  anthropicWire += bridge.finish()
+
+  const text: string[] = []
+  const tools: string[] = []
+  const acc = createStreamAccumulator({
+    onText: (d) => text.push(d),
+    onToolStart: (n) => tools.push(n),
+  })
+  for (let i = 0; i < anthropicWire.length; i += 13) acc.push(anthropicWire.slice(i, i + 13))
+  const result = acc.finish()
+
+  check('text survives the round trip', text.join('') === 'Gezegeni kuruyorum.', text.join(''))
+  check('tool start is reported', tools.join(',') === 'set_fields', tools.join(','))
+  check('two blocks rebuilt', result.content.length === 2, String(result.content.length))
+
+  const tb = result.content.find((b) => b.type === 'tool_use')
+  const input = tb?.type === 'tool_use' ? (tb.input as any) : null
+  check('split tool arguments reassemble', input?.updates?.[0]?.key === 'planet_name', JSON.stringify(input))
+  check('value survives the split', input?.updates?.[0]?.value === 'Vesper')
+  check('finish_reason maps to a stop reason', result.stopReason === 'tool_use', String(result.stopReason))
+  check('usage is forwarded for cost tracking', anthropicWire.includes('"input_tokens":1234'))
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

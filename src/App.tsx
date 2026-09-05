@@ -5,9 +5,11 @@ import type { CardRow, MessageRow, ProposalRow, ShotListRow, ShotRow, WorldRow }
 import { cardOrder, schemas } from './schemas'
 import type { CardFields, CardType, Scene } from './schemas'
 import { runAgentTurn, applyUpdates } from './agents/runner'
+import type { LibraryList, SequenceSelection } from './agents/runner'
 import { clearAgentConfigCache } from './agents/config'
 import { useSettings } from './lib/settings'
 import { describeError } from './lib/errors'
+import { recordUsage, describeUsage } from './lib/usage'
 import { Auth } from './components/Auth'
 import { ResetPassword } from './components/ResetPassword'
 import { Settings } from './components/Settings'
@@ -75,7 +77,7 @@ export default function App() {
 }
 
 function Studio({ session }: { session: Session }) {
-  const { model } = useSettings()
+  const { model, effort } = useSettings()
   const [worlds, setWorlds] = useState<WorldRow[]>([])
   const [worldId, setWorldId] = useState<string | null>(null)
   const [cards, setCards] = useState<CardRow[]>([])
@@ -84,6 +86,7 @@ function Studio({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false)
   const [streamText, setStreamText] = useState('')
   const [status, setStatus] = useState<string | null>(null)
+  const [lastUsage, setLastUsage] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
@@ -321,10 +324,12 @@ function Studio({ session }: { session: Session }) {
     persistCard(card.id, { scenes: next })
   }
 
+  /** Manual override: pins a list, clears the agent's shot range. */
   function onShotListChange(id: string | null) {
     if (!card) return
-    updateCardLocal(card.id, (c) => ({ ...c, shot_list_id: id }))
-    persistCard(card.id, { shot_list_id: id }, true)
+    const patch = { shot_list_id: id, sequence_start: null, sequence_end: null }
+    updateCardLocal(card.id, (c) => ({ ...c, ...patch }))
+    persistCard(card.id, patch, true)
   }
 
   async function onSend(text: string) {
@@ -350,31 +355,66 @@ function Studio({ session }: { session: Session }) {
       // full current sheet state, so tool blocks need not persist.
       const history = messages.map((m) => ({ role: m.role, content: m.text }))
 
-      // The storyboard adapts a real, measured sequence; without the shot list
-      // it would have nothing to preserve and would start inventing shots.
+      // The storyboard adapts a real, measured sequence chosen from the WHOLE
+      // library — every ready list, every shot — not from one user-picked list.
+      // Without it the agent would have nothing to preserve and would invent.
       let shots: ShotRow[] = []
-      if (card.type === 'storyboard' && card.shot_list_id) {
-        const { data } = await supabase
-          .from('dc_shots')
-          .select('*')
-          .eq('shot_list_id', card.shot_list_id)
-          .order('ordinal', { ascending: true })
-        shots = (data ?? []) as ShotRow[]
+      let lists: LibraryList[] = []
+      if (card.type === 'storyboard') {
+        const { data: ls } = await supabase
+          .from('dc_shot_lists')
+          .select('id, title, duration_seconds')
+          .in('status', ['ready', 'locked'])
+          .order('created_at', { ascending: true })
+        lists = (ls ?? []) as LibraryList[]
+        if (lists.length) {
+          const { data } = await supabase
+            .from('dc_shots')
+            .select('*')
+            .in(
+              'shot_list_id',
+              lists.map((l) => l.id),
+            )
+            .order('shot_list_id', { ascending: true })
+            .order('ordinal', { ascending: true })
+          shots = (data ?? []) as ShotRow[]
+        }
       }
+      const selection: SequenceSelection | null =
+        card.type === 'storyboard' &&
+        card.shot_list_id &&
+        card.sequence_start != null &&
+        card.sequence_end != null
+          ? { shot_list_id: card.shot_list_id, start: card.sequence_start, end: card.sequence_end }
+          : null
 
       const res = await runAgentTurn({
         model,
         type: card.type,
         fields: card.fields,
         shots,
+        lists,
+        selection,
         scenes: (card.scenes ?? []) as Scene[],
         ancestors,
         history,
         userMessage: text,
         locked: card.status === 'locked',
+        effort,
         onText: (d) => setStreamText((t) => t + d),
         onStatus: setStatus,
       })
+
+      recordUsage({
+        kind: 'agent_turn',
+        agent: card.type,
+        cardId: card.id,
+        model,
+        effort,
+        requests: res.requests,
+        usage: res.usage,
+      })
+      setLastUsage(describeUsage(res.usage, res.requests))
 
       if (res.proposal) {
         const { error: pErr } = await supabase.from('dc_protocol_proposals').insert({
@@ -393,13 +433,20 @@ function Studio({ session }: { session: Session }) {
       const titleUpdate = res.updates.find((u) => u.key === TITLE_KEY[card.type])
       const title = titleUpdate ? titleUpdate.value : card.title
       const nextScenes = res.scenes ?? ((card.scenes ?? []) as Scene[])
+      const seqPatch: Partial<CardRow> = res.sequence
+        ? {
+            shot_list_id: res.sequence.shot_list_id,
+            sequence_start: res.sequence.start,
+            sequence_end: res.sequence.end,
+          }
+        : {}
 
-      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, title, scenes: nextScenes }))
+      updateCardLocal(card.id, (c) => ({ ...c, fields: nextFields, title, scenes: nextScenes, ...seqPatch }))
       persistCard(
         card.id,
         res.scenes
-          ? { fields: nextFields, title, scenes: nextScenes }
-          : { fields: nextFields, title },
+          ? { fields: nextFields, title, scenes: nextScenes, ...seqPatch }
+          : { fields: nextFields, title, ...seqPatch },
         true,
       )
 
@@ -418,7 +465,9 @@ function Studio({ session }: { session: Session }) {
               res.text ||
               (res.updates.length
                 ? `(Ajan ${res.updates.length} alanı güncelledi, ayrıca bir şey yazmadı.)`
-                : '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Kart kilitliyse önce kilidi açın.)'),
+                : card.status === 'locked'
+                  ? '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Kart kilitli — değişiklik için önce kilidi açın.)'
+                  : '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Lütfen tekrar deneyin; sorun sürerse isteği küçültün.)'),
             wrote: res.updates.map((u) => u.key),
           },
         ])
@@ -606,6 +655,7 @@ function Studio({ session }: { session: Session }) {
               busy={busy}
               streamText={streamText}
               status={status}
+              lastUsage={lastUsage}
               error={error}
               saving={saving}
               onFieldChange={onFieldChange}

@@ -339,23 +339,53 @@ function buildStoryboardPrompts(ctx: PromptContext): BuiltPrompt[] {
   const species = val(ctx.ancestors.species, 'species_name') || '[Species]'
   const location = val(ctx.ancestors.location, 'location_name') || '[Location]'
 
-  // The board itself: one image containing every frame.
+  // The board itself, following the master prompt's STORYBOARD PROMPT TEMPLATE
+  // section for section: header, common blocks, then one full SCENE block per
+  // frame. A frame line carrying only a timestamp and description was not the
+  // template, and it dropped the camera language the image model needs.
+  const duration = val(ctx.fields, 'target_duration') || '15 seconds'
+  const pad = (i: number) => String(i + 1).padStart(2, '0')
+  const coreDirective = schema.directive.includes('CORE DIRECTIVE')
+    ? schema.directive.slice(schema.directive.indexOf('CORE DIRECTIVE'))
+    : schema.directive
+  const outputTail = schema.promptTail.includes('OUTPUT')
+    ? schema.promptTail.slice(schema.promptTail.indexOf('OUTPUT'))
+    : schema.promptTail
+
+  const sceneBlocks = scenes.map(
+    (s, i) => `SCENE ${pad(i)}
+Timestamp:
+${s.timestamp_start}–${s.timestamp_end}
+Scene Description
+${s.scene_description}
+Camera Angle
+${s.camera_angle}
+Shot Type
+${s.shot_type}
+Camera Movement
+${s.camera_movement}
+Visual Prompt
+${s.visual_prompt}
+Audio
+${s.audio}
+Voice-over
+${s.voice_over}`,
+  )
+
   const board = [
-    `Create a premium AAA ecosystem storyboard image for an ultra-photorealistic fictional nature documentary filmed on ${planet}, capturing ${species} during its natural life inside ${location}.`,
-    schema.directive,
+    `Create a premium AAA ecosystem storyboard image using the supplied Planet Identity Sheet, Ecosystem Identity Sheet, Species Identity Sheet, Location Identity Sheet. For an ultra-photorealistic fictional ${duration} AI-generated nature documentary filmed on **${planet}**, capturing **${species}** during its natural daily life inside **${location}**.
+The storyboard must faithfully preserve the cinematographic language of the selected reference shots while adapting every visual, biological and environmental element to the fictional world.
+Compose the storyboard as a **16:9 production board** containing **${scenes.length || '[Number of Frames]'}** storyboard frames.
+Each frame represents one scene and contains a **vertical 9:16 preview image**.
+Below every frame include:
+• Timestamp
+• Scene Description`,
+    coreDirective,
     WORLD_RULES,
     inherited,
     common,
-    `Compose the storyboard as a 16:9 production board containing ${scenes.length || '[N]'} storyboard frames.
-Each frame represents one scene and contains a vertical 9:16 preview image.
-Below every frame include the timestamp and the scene description.`,
-    scenes
-      .map(
-        (s, i) =>
-          `FRAME ${String(i + 1).padStart(2, '0')} — ${s.timestamp_start}–${s.timestamp_end}\n${s.scene_description}`,
-      )
-      .join('\n\n'),
-    schema.promptTail,
+    ...sceneBlocks,
+    outputTail,
   ]
     .filter(Boolean)
     .join('\n\n────────────────────\n\n')
