@@ -167,6 +167,27 @@ denenir. (3) `max_tokens` ucretsiz saglayicida 8000'e iner — NIM modelleri
 Claude gibi dusunmez, 24000 sadece bos butce olurdu. Ucretli Claude'a donmek
 Ayarlar'dan model secmek kadar; kod yollari ayni kalir.
 
+**Model kimlikleri sessizce olur.** Ilk ucretsiz varsayilan
+`nvidia/llama-3.3-nemotron-super-49b-v1.5` yayina alindiktan sonra NVIDIA onu
+katalogdan kaldirdi ve istekler 410 dondu. Uc ders kodda:
+
+1. Katalog herkese acik ve anahtar istemez:
+   `curl -s https://integrate.api.nvidia.com/v1/models`. Bir model hata
+   veriyorsa once burada var mi diye bakin — `npm run check:nvidia` bunu
+   anahtar olmadan da yapar.
+2. Izin listesi artik `bridge.ts` icinde ve smoke testi UI'daki her modelin
+   sunucuda da acik oldugunu dogruluyor. Ikisi ayri yerde durdugu surece
+   biri guncellenip digeri unutuluyordu.
+3. Secili model `localStorage`'da yasar ve dagitimdan uzun omurludur. Artik
+   `getModel()` kayitli degeri `MODELS` listesine karsi dogruluyor; yoksa
+   varsayilana duser. Bu olmadan duzeltme yayinlansa bile tarayicida kayitli
+   olu kimlik okunmaya devam ederdi.
+
+Ayrica NIM hata mesajini `{detail}`, `{message}` ya da `{title}` altinda
+yazar; Anthropic bicimini bekleyen istemci hicbirini okuyamayip ekrana
+"Sunucu hatasi (410)" basiyordu. `toAnthropicError` artik hepsini tek bicime
+cevirir, 404/410 icin de modelin adini soyler.
+
 **Yayın bazen GitHub tarafında düşer.** 6 Ağustos'ta üç gün runner alınamadı.
 Kod tarafı değil; şununla yeniden tetiklenir:
 

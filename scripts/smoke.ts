@@ -15,7 +15,8 @@ import {
   selectSequenceTool,
 } from '../src/agents/runner'
 import type { ShotContext, LibraryList } from '../src/agents/runner'
-import { buildRequestBody, isTransient, AnthropicError } from '../src/lib/anthropic'
+import { buildRequestBody, isTransient, AnthropicError, MODELS, supportsVision } from '../src/lib/anthropic'
+import { DEFAULT_MODEL } from '../src/lib/settings'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
 import { formatTimecode, dataUrlParts, findCutIndices } from '../src/lib/video'
@@ -27,6 +28,8 @@ import {
   toOpenAIMessages,
   toOpenAIRequest,
   createOpenAIToAnthropic,
+  toAnthropicError,
+  ALLOWED_MODELS,
 } from '../supabase/functions/anthropic/bridge'
 
 /** Stands in for the database-backed config, using the transcribed constants. */
@@ -890,6 +893,41 @@ console.log('\n== nvidia bridge: stream round-trip ==')
   check('value survives the split', input?.updates?.[0]?.value === 'Vesper')
   check('finish_reason maps to a stop reason', result.stopReason === 'tool_use', String(result.stopReason))
   check('usage is forwarded for cost tracking', anthropicWire.includes('"input_tokens":1234'))
+}
+
+// The free tier broke once because a model id in the UI no longer existed
+// upstream, and once more because the server would have rejected it anyway.
+// Both are offline-checkable.
+{
+  for (const m of MODELS) {
+    check('server allows ' + m.id, ALLOWED_MODELS.has(m.id))
+  }
+  check('default model is offered in the UI', MODELS.some((m) => m.id === DEFAULT_MODEL), DEFAULT_MODEL)
+  check('at least one vision model is offered', MODELS.some((m) => m.vision && m.id !== 'claude-sonnet-5' && m.id !== 'claude-opus-5'))
+  check('vision is read from the table, not the name', supportsVision('nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'))
+  check('a text model is not treated as sighted', !supportsVision('nvidia/nemotron-3-super-120b-a12b'))
+
+  // NIM hides its message under a different key for every failure mode; each
+  // of these once reduced to a bare status code on screen.
+  const gone = toAnthropicError(410, JSON.stringify({ detail: 'Model is no longer available' })) as any
+  check('NIM detail becomes a message', gone.error.message === 'Model is no longer available', JSON.stringify(gone))
+  check('410 is labelled as a retired model', gone.error.type === 'model_gone', gone.error.type)
+
+  const problem = toAnthropicError(404, JSON.stringify({ title: 'Not Found', status: 404 })) as any
+  check('problem documents surface their title', problem.error.message === 'Not Found', JSON.stringify(problem))
+
+  const nested = toAnthropicError(400, JSON.stringify({ error: { message: 'bad tool schema', type: 'invalid_request_error' } })) as any
+  check('Anthropic-shaped errors pass through', nested.error.message === 'bad tool schema')
+  check('and keep their type', nested.error.type === 'invalid_request_error')
+
+  const validation = toAnthropicError(422, JSON.stringify({ detail: [{ msg: 'max_tokens too large' }] })) as any
+  check('validation arrays are joined', validation.error.message === 'max_tokens too large', JSON.stringify(validation))
+
+  const html = toAnthropicError(502, '<html>Bad Gateway</html>') as any
+  check('unparseable bodies keep their text', html.error.message.includes('Bad Gateway'), html.error.message)
+
+  const empty = toAnthropicError(500, '') as any
+  check('an empty body still says something', empty.error.message.length > 0, empty.error.message)
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

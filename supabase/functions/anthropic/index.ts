@@ -28,19 +28,11 @@ import {
   toOpenAIRequest,
   createOpenAIToAnthropic,
   toAnthropicMessage,
+  toAnthropicError,
+  ALLOWED_MODELS,
 } from './bridge.ts'
 
-const ALLOWED_MODELS = new Set([
-  'claude-sonnet-5',
-  'claude-opus-5',
-  // NVIDIA NIM. Free tier, OpenAI-compatible, ~40 requests/minute shared across
-  // the whole key — enough for this app, which calls sequentially.
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'nvidia/llama-3.1-nemotron-ultra-253b-v1',
-  'deepseek-ai/deepseek-v3.1',
-  // Vision, for Shot Library frame analysis.
-  'nvidia/llama-3.1-nemotron-nano-vl-8b-v1',
-])
+
 
 const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions'
 // max_tokens caps thinking + visible output combined, and these models think
@@ -298,6 +290,11 @@ Deno.serve(async (req: Request) => {
   }
 
   const text = await upstream.text()
+  // NIM writes its explanation under a key the client does not read, so an
+  // informative failure arrived as a bare status code. Normalise it here.
+  if (provider === 'nvidia' && !upstream.ok) {
+    return json(toAnthropicError(upstream.status, text), upstream.status, origin)
+  }
   return new Response(text, {
     status: upstream.status,
     headers: { ...corsHeaders(origin), 'content-type': 'application/json' },

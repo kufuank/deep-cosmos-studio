@@ -25,6 +25,35 @@ export interface AnthropicRequest {
   stream?: boolean
 }
 
+/**
+ * Models the proxy will call.
+ *
+ * Lives here rather than in index.ts so the offline smoke test can check it
+ * against the list the UI offers: a model the client can select but the server
+ * rejects is a 400 that looks like a bug in the agent.
+ *
+ * The NIM entries are checked against https://integrate.api.nvidia.com/v1/models,
+ * which is public and changes without notice — a withdrawn model answers 410.
+ */
+export const ALLOWED_MODELS = new Set([
+  'claude-sonnet-5',
+  'claude-opus-5',
+  // Text candidates for the agent loop.
+  'nvidia/nemotron-3-super-120b-a12b',
+  'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-nano-3-30b-a3b',
+  'nvidia/llama-3.1-nemotron-ultra-253b-v1',
+  'openai/gpt-oss-20b',
+  'moonshotai/kimi-k3',
+  'deepseek-ai/deepseek-v4-pro-0813',
+  // Vision, for Shot Library frame analysis. Must do images AND tool calls —
+  // the analysis returns its 16 columns through a tool, not as prose.
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+  'meta/llama-3.2-90b-vision-instruct',
+  'meta/llama-3.2-11b-vision-instruct',
+  'google/gemma-3-12b-it',
+])
+
 /** NVIDIA NIM is OpenAI-compatible; anything not Anthropic routes there. */
 export function providerFor(model: string): 'anthropic' | 'nvidia' {
   return model.startsWith('claude-') ? 'anthropic' : 'nvidia'
@@ -351,4 +380,49 @@ export function toAnthropicMessage(oa: any): Record<string, unknown> {
       output_tokens: Number(oa?.usage?.completion_tokens ?? 0),
     },
   }
+}
+
+/**
+ * Normalises an upstream error body into the Anthropic error shape.
+ *
+ * The two providers disagree about where an error message lives: Anthropic
+ * uses `{error: {type, message}}`, while NIM variously returns `{detail}`,
+ * `{message}`, `{title}` or an RFC 7807 problem document. Passing NIM's body
+ * through verbatim left the client with no field it recognised, so a real
+ * explanation — "this model was retired" — reached the user as the bare string
+ * "Sunucu hatası (410)". Anything unrecognised keeps its raw text rather than
+ * being discarded.
+ */
+export function toAnthropicError(status: number, bodyText: string): Record<string, unknown> {
+  let message = ''
+  let type = ''
+  try {
+    const b = JSON.parse(bodyText) as Record<string, any>
+    if (typeof b?.error === 'string') message = b.error
+    else if (b?.error && typeof b.error === 'object') {
+      message = String(b.error.message ?? b.error.detail ?? '')
+      type = String(b.error.type ?? '')
+    }
+    if (!message) {
+      const detail = b?.detail
+      message =
+        typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: any) => d?.msg ?? d?.message ?? '').filter(Boolean).join('; ')
+            : ''
+    }
+    if (!message) message = String(b?.message ?? b?.title ?? '')
+  } catch {
+    message = bodyText.slice(0, 400).trim()
+  }
+
+  // 404/410 are the same situation to a user: the model named in Settings is
+  // no longer served. Say which model, because the reply otherwise names none.
+  if (!type) {
+    type = status === 410 || status === 404 ? 'model_gone' : 'api_error'
+  }
+  if (!message) message = `Saglayici ${status} dondurdu.`
+
+  return { type: 'error', error: { type, message } }
 }

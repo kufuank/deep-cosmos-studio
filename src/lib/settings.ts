@@ -1,4 +1,5 @@
 import { useCallback, useSyncExternalStore } from 'react'
+import { MODELS } from './anthropic'
 import type { Effort } from './anthropic'
 
 /**
@@ -17,9 +18,20 @@ function subscribe(l: () => void) {
   return () => listeners.delete(l)
 }
 
-/** Defaults to the free provider; a stored choice always wins. */
+export const DEFAULT_MODEL = 'nvidia/nemotron-3-super-120b-a12b'
+
+/**
+ * Defaults to the free provider; a stored choice wins only if it still exists.
+ *
+ * Providers withdraw models from their catalogue without notice, and a
+ * withdrawn one answers 410. The stored id outlives the deployment that
+ * offered it, so a browser that had selected a since-retired model would keep
+ * failing after the fix shipped — the setting has to be checked, not trusted.
+ */
 export function getModel(): string {
-  return localStorage.getItem(MODEL_STORAGE) ?? 'nvidia/llama-3.3-nemotron-super-49b-v1.5'
+  const stored = localStorage.getItem(MODEL_STORAGE)
+  if (stored && MODELS.some((m) => m.id === stored)) return stored
+  return DEFAULT_MODEL
 }
 
 /**

@@ -14,42 +14,86 @@ import { supabase } from './supabase'
  * minute across the whole key.
  */
 export const MODELS = [
-  { id: 'claude-sonnet-5', label: 'Sonnet 5 — hızlı, günlük kullanım' },
-  { id: 'claude-opus-5', label: 'Opus 5 — daha derin akıl yürütme' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5 — hızlı, günlük kullanım', vision: true },
+  { id: 'claude-opus-5', label: 'Opus 5 — daha derin akıl yürütme', vision: true },
   {
-    id: 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-    label: 'NVIDIA · Nemotron Super 49B — ücretsiz, metin',
+    id: 'nvidia/nemotron-3-super-120b-a12b',
+    label: 'NVIDIA · Nemotron 3 Super 120B — ücretsiz, metin',
+    vision: false,
+  },
+  {
+    id: 'nvidia/nemotron-3-ultra-550b-a55b',
+    label: 'NVIDIA · Nemotron 3 Ultra 550B — ücretsiz, metin',
+    vision: false,
   },
   {
     id: 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
     label: 'NVIDIA · Nemotron Ultra 253B — ücretsiz, metin',
+    vision: false,
   },
-  { id: 'deepseek-ai/deepseek-v3.1', label: 'NVIDIA · DeepSeek V3.1 — ücretsiz, metin' },
   {
-    id: 'nvidia/llama-3.1-nemotron-nano-vl-8b-v1',
-    label: 'NVIDIA · Nemotron Nano VL 8B — ücretsiz, görsel',
+    id: 'nvidia/nemotron-nano-3-30b-a3b',
+    label: 'NVIDIA · Nemotron Nano 3 30B — ücretsiz, hızlı',
+    vision: false,
   },
+  { id: 'openai/gpt-oss-20b', label: 'NVIDIA · GPT-OSS 20B — ücretsiz, metin', vision: false },
+  { id: 'moonshotai/kimi-k3', label: 'NVIDIA · Kimi K3 — ücretsiz, metin', vision: false },
+  {
+    id: 'deepseek-ai/deepseek-v4-pro-0813',
+    label: 'NVIDIA · DeepSeek V4 Pro — ücretsiz, metin',
+    vision: false,
+  },
+  {
+    id: 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+    label: 'NVIDIA · Nemotron 3 Omni 30B — ücretsiz, görsel',
+    vision: true,
+  },
+  {
+    id: 'meta/llama-3.2-90b-vision-instruct',
+    label: 'NVIDIA · Llama 3.2 90B Vision — ücretsiz, görsel',
+    vision: true,
+  },
+  {
+    id: 'meta/llama-3.2-11b-vision-instruct',
+    label: 'NVIDIA · Llama 3.2 11B Vision — ücretsiz, görsel',
+    vision: true,
+  },
+  { id: 'google/gemma-3-12b-it', label: 'NVIDIA · Gemma 3 12B — ücretsiz, görsel', vision: true },
 ] as const
 
-/** Only Claude and the NIM `-vl-` model can read Shot Library frames. */
+/**
+ * Whether a model can read Shot Library frames.
+ *
+ * This was a substring test on the model name until the name it keyed off
+ * stopped existing. A frame sent to a text model is not refused — it is
+ * dropped, and the analysis then describes nothing — so the answer has to come
+ * from the table above rather than from how an id happens to be spelled.
+ */
 export function supportsVision(model: string): boolean {
-  return model.startsWith('claude-') || model.includes('-vl-')
+  const known = MODELS.find((m) => m.id === model)
+  if (known) return known.vision
+  return model.startsWith('claude-')
 }
 
 export function isFreeProvider(model: string): boolean {
   return !model.startsWith('claude-')
 }
 
-/** NIM's vision model, used whenever the chosen chat model cannot see. */
-export const NVIDIA_VISION_MODEL = 'nvidia/llama-3.1-nemotron-nano-vl-8b-v1'
+/**
+ * NIM's vision model, used whenever the chosen chat model cannot see.
+ *
+ * Shot analysis returns its 16 columns through a tool call, so this model has
+ * to do images *and* tool calls — a plain VLM is not enough. Verify a
+ * replacement with `npm run check:nvidia` before changing it.
+ */
+export const NVIDIA_VISION_MODEL = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
 
 /**
  * The model that must handle a frame-carrying request.
  *
- * The chat model and the vision model are not the same choice: on NIM only the
- * `-vl-` model reads images, and sending frames to a text model drops them
- * silently — the analysis then describes nothing and looks like a model failure.
- * Shot analysis therefore always resolves its own model rather than inheriting
+ * The chat model and the vision model are not the same choice: most NIM models
+ * cannot read images, and sending frames to one drops them silently. Shot
+ * analysis therefore always resolves its own model rather than inheriting
  * whatever is selected for conversation.
  */
 export function visionModelFor(chatModel: string): string {
@@ -203,6 +247,46 @@ export function buildRequestBody(opts: CallOptions, stream: boolean): Record<str
   }
 }
 
+/**
+ * Pulls a human message out of an error response.
+ *
+ * The providers disagree about where it lives — Anthropic uses
+ * `{error: {type, message}}`, NIM variously `{detail}`, `{message}` or
+ * `{title}`. Reading only Anthropic's shape meant a NIM failure arrived with
+ * nothing to show, and a retired model reported itself as 'Sunucu hatası
+ * (410)'. The server normalises this too; the client reads both shapes so an
+ * older deployment still explains itself.
+ */
+async function errorDetail(res: Response): Promise<{ detail: string; kind?: string }> {
+  try {
+    const b = (await res.json()) as Record<string, any>
+    if (typeof b?.error === 'string') return { detail: b.error }
+    if (b?.error && typeof b.error === 'object') {
+      const detail = String(b.error.message ?? b.error.detail ?? '')
+      if (detail) return { detail, kind: b.error.type ? String(b.error.type) : undefined }
+    }
+    const d = b?.detail
+    const detail =
+      typeof d === 'string'
+        ? d
+        : Array.isArray(d)
+          ? d.map((x: any) => x?.msg ?? x?.message ?? '').filter(Boolean).join('; ')
+          : String(b?.message ?? b?.title ?? '')
+    return { detail }
+  } catch {
+    return { detail: '' }
+  }
+}
+
+/** A model that the provider has withdrawn — the commonest free-tier breakage. */
+function goneMessage(model: string, detail: string): string {
+  const base =
+    'Seçili model (' +
+    model +
+    ") sağlayıcının kataloğundan kaldırılmış. Ayarlar bölümünden başka bir model seçin."
+  return detail ? base + ' Sağlayıcı: ' + detail : base
+}
+
 export class AnthropicError extends Error {
   constructor(
     message: string,
@@ -262,17 +346,12 @@ async function callOnce(opts: CallOptions): Promise<CallResult> {
   }
 
   if (!res.ok) {
-    let detail = ''
-    let kind: string | undefined
-    try {
-      const body = (await res.json()) as { error?: string | { message?: string; type?: string } }
-      detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '')
-      kind = typeof body.error === 'object' ? body.error?.type : undefined
-    } catch {
-      detail = ''
-    }
+    const { detail, kind } = await errorDetail(res)
     if (res.status === 401) {
       throw new AnthropicError(detail || 'Oturumunuz sona ermiş. Tekrar giriş yapın.', 401)
+    }
+    if (res.status === 410 || res.status === 404) {
+      throw new AnthropicError(goneMessage(opts.model, detail), res.status, 'model_gone')
     }
     if (res.status === 429) {
       throw new AnthropicError('Hız sınırına takıldınız. Biraz bekleyip tekrar deneyin.', 429)
@@ -395,19 +474,12 @@ async function streamOnce(opts: CallOptions & StreamHandlers): Promise<CallResul
   }
 
   if (!res.ok || !res.body) {
-    let detail = ''
-    let kind: string | undefined
-    try {
-      const body = (await res.json()) as {
-        error?: string | { message?: string; type?: string }
-      }
-      detail = typeof body.error === 'string' ? body.error : (body.error?.message ?? '')
-      kind = typeof body.error === 'object' ? body.error?.type : undefined
-    } catch {
-      /* fall through to the status-based message */
-    }
+    const { detail, kind } = await errorDetail(res)
     if (res.status === 401) {
       throw new AnthropicError(detail || 'Oturumunuz sona ermiş. Tekrar giriş yapın.', 401)
+    }
+    if (res.status === 410 || res.status === 404) {
+      throw new AnthropicError(goneMessage(opts.model, detail), res.status, 'model_gone')
     }
     if (res.status === 429) {
       throw new AnthropicError('Hız sınırına takıldınız. Biraz bekleyip tekrar deneyin.', 429)
