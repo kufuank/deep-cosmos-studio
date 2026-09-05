@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSettings } from '../lib/settings'
-import { MODELS, EFFORTS } from '../lib/anthropic'
+import { MODELS, EFFORTS, isFreeProvider, visionModelFor, NVIDIA_VISION_MODEL } from '../lib/anthropic'
 import type { Effort } from '../lib/anthropic'
 import { loadAgentConfig } from '../agents/config'
 import { cardOrder, schemas } from '../schemas'
@@ -47,6 +47,17 @@ export function Settings({ onClose }: { onClose: () => void }) {
           </select>
         </div>
 
+        <div className="rounded-md border border-edge bg-white/[0.02] px-3 py-2">
+          <p className="text-[11px] text-slate-400">
+            {isFreeProvider(model) ? 'Ücretsiz NVIDIA NIM katmanı' : 'Ücretli Anthropic API'}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-600 leading-relaxed">
+            {isFreeProvider(model)
+              ? `Sohbet bu modelle, Shot Library çözümlemesi ise görsel okuyabilen ${NVIDIA_VISION_MODEL.split('/')[1]} ile yapılır — metin modeline kare gönderilse sessizce yok sayılırdı. Dakikada ~40 istek sınırı var, uzun videolarda çözümleme kendini yavaşlatır.`
+              : `Sohbet ve Shot Library aynı modeli kullanır (${visionModelFor(model).split('/').pop()}); bu model görselleri kendisi okuyabiliyor.`}
+          </p>
+        </div>
+
         <div>
           <label className="label">Düşünme derinliği</label>
           <select
@@ -61,8 +72,9 @@ export function Settings({ onClose }: { onClose: () => void }) {
             ))}
           </select>
           <p className="mt-1 text-[11px] text-slate-600">
-            {EFFORTS.find((o) => o.id === effort)?.hint} Model her turda kendi kendine düşünür
-            ve bu düşünme çıktı token’ı olarak ücretlendirilir; en büyük maliyet kalemi budur.
+            {isFreeProvider(model)
+              ? 'NVIDIA modellerinde bu ayar geçerli değil — düşünme derinliği yalnızca Claude modellerinde uygulanır.'
+              : `${EFFORTS.find((o) => o.id === effort)?.hint} Model her turda kendi kendine düşünür ve bu düşünme çıktı token’ı olarak ücretlendirilir; en büyük maliyet kalemi budur.`}
           </p>
         </div>
 

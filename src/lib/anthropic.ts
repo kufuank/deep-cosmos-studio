@@ -31,10 +31,37 @@ export const MODELS = [
   },
 ] as const
 
-/** Only the vision model can read Shot Library frames. */
+/** Only Claude and the NIM `-vl-` model can read Shot Library frames. */
 export function supportsVision(model: string): boolean {
   return model.startsWith('claude-') || model.includes('-vl-')
 }
+
+export function isFreeProvider(model: string): boolean {
+  return !model.startsWith('claude-')
+}
+
+/** NIM's vision model, used whenever the chosen chat model cannot see. */
+export const NVIDIA_VISION_MODEL = 'nvidia/llama-3.1-nemotron-nano-vl-8b-v1'
+
+/**
+ * The model that must handle a frame-carrying request.
+ *
+ * The chat model and the vision model are not the same choice: on NIM only the
+ * `-vl-` model reads images, and sending frames to a text model drops them
+ * silently — the analysis then describes nothing and looks like a model failure.
+ * Shot analysis therefore always resolves its own model rather than inheriting
+ * whatever is selected for conversation.
+ */
+export function visionModelFor(chatModel: string): string {
+  return supportsVision(chatModel) ? chatModel : NVIDIA_VISION_MODEL
+}
+
+/**
+ * NIM's free tier allows roughly 40 requests per minute across the whole key.
+ * Shot analysis is one request per shot, so it must pace itself or a long video
+ * ends in 429s partway through.
+ */
+export const FREE_TIER_MIN_GAP_MS = 1600
 
 export interface ToolDef {
   name: string
@@ -163,7 +190,11 @@ export function buildRequestBody(opts: CallOptions, stream: boolean): Record<str
     // default, and a hard sheet can burn 8k tokens of thinking alone — a low
     // cap ends the turn at stop_reason "max_tokens" before any field is
     // written. 24000 leaves room for thinking plus a large batched tool call.
-    max_tokens: opts.maxTokens ?? 24000,
+    max_tokens:
+      opts.maxTokens ??
+      // Anthropic's budget has to cover thinking as well as visible output; NIM
+      // models do not think, and several cap output well below 24k.
+      (isFreeProvider(opts.model) ? 8000 : 24000),
     system,
     messages,
     ...(opts.effort ? { output_config: { effort: opts.effort } } : {}),
@@ -286,6 +317,9 @@ export interface StreamHandlers {
  */
 export function isTransient(e: unknown): boolean {
   if (!(e instanceof AnthropicError)) return false
+  // 429 is expected traffic on the free tier rather than a fault, so it retries
+  // like an overload instead of surfacing as an error.
+  if (e.status === 429) return true
   if (e.status === 529 || e.status === 500 || e.status === 502 || e.status === 503) return true
   return e.kind === 'overloaded_error' || e.kind === 'api_error'
 }

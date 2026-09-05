@@ -7,6 +7,7 @@ import type { DetectedShot, DetectionReport } from '../lib/video'
 import { analyseShot, shotSummary } from '../agents/deconstruct'
 import { recordUsage } from '../lib/usage'
 import { useSettings } from '../lib/settings'
+import { visionModelFor, isFreeProvider, FREE_TIER_MIN_GAP_MS } from '../lib/anthropic'
 import { describeError, isAbort } from '../lib/errors'
 import { ShotTable } from './ShotTable'
 
@@ -131,19 +132,36 @@ export function ShotLibrary({ session }: { session: Session }) {
       const rev = reviewDetection(detected, video.duration)
       setReport(rev)
 
+      // Frames only reach a model that can see them; the conversation model is
+      // irrelevant here and choosing a text one would silently drop the images.
+      const analysisModel = visionModelFor(model)
+      const paced = isFreeProvider(analysisModel)
+      let lastCallAt = 0
+
       let previous: string | undefined
       for (let i = 0; i < detected.length; i++) {
         if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
         setProgress({ label: 'Planlar çözümleniyor', done: i, total: detected.length })
         const d = detected[i]
+
+        // The free tier allows ~40 requests a minute across the key, so a long
+        // video has to wait its turn rather than collect 429s halfway through.
+        if (paced) {
+          const since = Date.now() - lastCallAt
+          if (lastCallAt && since < FREE_TIER_MIN_GAP_MS) {
+            await new Promise((r) => setTimeout(r, FREE_TIER_MIN_GAP_MS - since))
+          }
+          lastCallAt = Date.now()
+        }
+
         const { analysis, usage } = await analyseShot({
-          model,
+          model: analysisModel,
           shot: d,
           totalShots: detected.length,
           previousSummary: previous,
           signal: controller.signal,
         })
-        recordUsage({ kind: 'shot_analysis', agent: 'deconstruction', model, effort: 'low', requests: 1, usage })
+        recordUsage({ kind: 'shot_analysis', agent: 'deconstruction', model: analysisModel, effort: 'low', requests: 1, usage })
         previous = shotSummary(analysis)
 
         const { data: row, error: insErr } = await supabase

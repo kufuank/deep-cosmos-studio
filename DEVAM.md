@@ -156,6 +156,17 @@ iceren model okur - Shot Library icin baska model secilirse kareler sessizce
 yok sayilir. `NVIDIA_API_KEY` Supabase Edge Function secret'i olarak eklenmelidir;
 saglik ucu `nvidia_key_configured` ile bunu bildirir.
 
+**Varsayilan artik ucretsiz katman.** Yeni kurulumda model
+`nvidia/llama-3.3-nemotron-super-49b-v1.5`. Bunun uc davranissal sonucu var ve
+ucu de kodda: (1) Shot Library sohbet modelini miras almaz,
+`visionModelFor()` ile kendi goren modelini secer — metin modeline kare
+gonderilse sessizce yok sayilirdi. (2) Cozumleme dongusu istekler arasinda en
+az `FREE_TIER_MIN_GAP_MS` (1600 ms) bekler; 40 planlik bir video boylece
+dakika sinirina carpmadan biter, 429 da artik kalici hata degil yeniden
+denenir. (3) `max_tokens` ucretsiz saglayicida 8000'e iner — NIM modelleri
+Claude gibi dusunmez, 24000 sadece bos butce olurdu. Ucretli Claude'a donmek
+Ayarlar'dan model secmek kadar; kod yollari ayni kalir.
+
 **Yayın bazen GitHub tarafında düşer.** 6 Ağustos'ta üç gün runner alınamadı.
 Kod tarafı değil; şununla yeniden tetiklenir:
 

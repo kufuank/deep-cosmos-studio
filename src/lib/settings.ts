@@ -17,8 +17,9 @@ function subscribe(l: () => void) {
   return () => listeners.delete(l)
 }
 
+/** Defaults to the free provider; a stored choice always wins. */
 export function getModel(): string {
-  return localStorage.getItem(MODEL_STORAGE) ?? 'claude-sonnet-5'
+  return localStorage.getItem(MODEL_STORAGE) ?? 'nvidia/llama-3.3-nemotron-super-49b-v1.5'
 }
 
 /**
