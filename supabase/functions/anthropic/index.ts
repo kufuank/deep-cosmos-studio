@@ -116,13 +116,29 @@ Deno.serve(async (req: Request) => {
   // Configuration check. Booleans only — never a key, never an email.
   if (req.method === 'GET') {
     const reachable = await allowlistLookup(null)
+    const raw = Deno.env.get('NVIDIA_API_KEY') ?? ''
     return json(
       {
         ok: true,
         // Reported per provider so a missing key is a diagnostic rather than a
         // 503 discovered mid-conversation.
         key_configured: Boolean(Deno.env.get('ANTHROPIC_API_KEY')),
-        nvidia_key_configured: Boolean(Deno.env.get('NVIDIA_API_KEY')),
+        nvidia_key_configured: Boolean(raw),
+        // "Configured" is not "usable": a value pasted with a stray newline
+        // makes fetch throw before the request is ever sent. Shape only — never
+        // the value.
+        nvidia_key_shape:
+          raw === ''
+            ? 'missing'
+            : raw !== raw.trim()
+              ? 'has_surrounding_whitespace'
+              : !/^[!-~]+$/.test(raw)
+                ? 'has_invalid_characters'
+                : raw.startsWith('nvapi-nvapi-')
+                  ? 'prefix_duplicated'
+                  : !raw.startsWith('nvapi-')
+                    ? 'missing_nvapi_prefix'
+                    : 'ok',
         allowlist_readable: reachable === true,
       },
       200,
@@ -182,13 +198,27 @@ Deno.serve(async (req: Request) => {
   const maxTokens = Math.min(payload.max_tokens ?? 24000, MAX_TOKENS_CAP)
 
   const keyName = provider === 'nvidia' ? 'NVIDIA_API_KEY' : 'ANTHROPIC_API_KEY'
-  const apiKey = Deno.env.get(keyName)
+  // A secret pasted into a dashboard field often carries a trailing newline.
+  // A header value containing one does not fail upstream — fetch itself throws,
+  // which reached the user as "cannot reach NIM" for what was really a
+  // malformed secret. Trim it, then refuse it outright if it still holds a
+  // character no header may carry.
+  const apiKey = (Deno.env.get(keyName) ?? '').trim()
   if (!apiKey) {
     return json(
       {
         error: `Sunucuda ${keyName} tanimli degil. Supabase panelinden Edge Function secret olarak ekleyin.`,
       },
       503,
+      origin,
+    )
+  }
+  if (!/^[!-~]+$/.test(apiKey)) {
+    return json(
+      {
+        error: `${keyName} gecersiz karakter iceriyor (bosluk, satir sonu veya ASCII disi). Supabase panelinde secret degerini bastan yapistirip kaydedin.`,
+      },
+      500,
       origin,
     )
   }
@@ -218,8 +248,10 @@ Deno.serve(async (req: Request) => {
         },
         body: JSON.stringify(oa),
       })
-    } catch {
-      return json({ error: "NVIDIA NIM'e ulasilamadi." }, 502, origin)
+    } catch (e) {
+      // Saying only "unreachable" hid the actual fault for a whole round trip.
+      const why = e instanceof Error ? e.message : String(e)
+      return json({ error: `NVIDIA NIM'e ulasilamadi: ${why}` }, 502, origin)
     }
   } else {
     // Thinking is on by default and billed as output; effort is the dial. Only
@@ -247,8 +279,9 @@ Deno.serve(async (req: Request) => {
         },
         body: JSON.stringify(body),
       })
-    } catch {
-      return json({ error: "Anthropic API'ye ulasilamadi." }, 502, origin)
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e)
+      return json({ error: `Anthropic API'ye ulasilamadi: ${why}` }, 502, origin)
     }
   }
 
