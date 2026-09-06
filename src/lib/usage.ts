@@ -13,6 +13,7 @@ export function recordUsage(entry: {
   effort?: string
   requests: number
   usage: Usage
+  durationMs?: number
 }): void {
   void supabase
     .from('dc_usage')
@@ -27,6 +28,7 @@ export function recordUsage(entry: {
       output_tokens: entry.usage.output,
       cache_read: entry.usage.cacheRead,
       cache_write: entry.usage.cacheWrite,
+      duration_ms: entry.durationMs ?? null,
     })
     .then(({ error }) => {
       if (error) console.warn('dc_usage insert failed', error)
@@ -35,12 +37,19 @@ export function recordUsage(entry: {
 
 /**
  * Human-readable one-liner for the chat footer. Cache reads are shown because
- * they are the proof that the prompt-cache breakpoints are landing.
+ * they are the proof that the prompt-cache breakpoints are landing; the
+ * duration and the rate are shown because on a free provider the complaint is
+ * never the token count, it is the wait — and the rate separates a slow
+ * provider from a prompt we made too large.
  */
-export function describeUsage(u: Usage, requests: number): string {
+export function describeUsage(u: Usage, requests: number, durationMs?: number): string {
   const fmt = (n: number) => n.toLocaleString('tr-TR')
   const cached = u.cacheRead > 0 ? `, ${fmt(u.cacheRead)} önbellekten` : ''
-  return `Bu tur: ${requests} istek · ${fmt(u.input + u.cacheRead + u.cacheWrite)} giriş${cached} · ${fmt(u.output)} çıktı (düşünme dahil)`
+  const head = `Bu tur: ${requests} istek · ${fmt(u.input + u.cacheRead + u.cacheWrite)} giriş${cached} · ${fmt(u.output)} çıktı (düşünme dahil)`
+  if (!durationMs) return head
+  const seconds = durationMs / 1000
+  const rate = u.output > 0 ? ` · ${Math.round(u.output / seconds)} token/sn` : ''
+  return `${head} · ${seconds.toFixed(1)} sn${rate}`
 }
 
 /** Rough USD estimate at list price, for the settings panel only. */

@@ -388,6 +388,7 @@ function Studio({ session }: { session: Session }) {
           ? { shot_list_id: card.shot_list_id, start: card.sequence_start, end: card.sequence_end }
           : null
 
+      const startedAt = Date.now()
       const res = await runAgentTurn({
         model,
         type: card.type,
@@ -405,6 +406,7 @@ function Studio({ session }: { session: Session }) {
         onStatus: setStatus,
       })
 
+      const elapsed = Date.now() - startedAt
       recordUsage({
         kind: 'agent_turn',
         agent: card.type,
@@ -413,8 +415,9 @@ function Studio({ session }: { session: Session }) {
         effort,
         requests: res.requests,
         usage: res.usage,
+        durationMs: elapsed,
       })
-      setLastUsage(describeUsage(res.usage, res.requests))
+      setLastUsage(describeUsage(res.usage, res.requests, elapsed))
 
       if (res.proposal) {
         const { error: pErr } = await supabase.from('dc_protocol_proposals').insert({

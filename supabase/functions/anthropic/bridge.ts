@@ -41,6 +41,7 @@ export const ALLOWED_MODELS = new Set([
   // Text candidates for the agent loop.
   'nvidia/nemotron-3-super-120b-a12b',
   'nvidia/nemotron-3-ultra-550b-a55b',
+  'nvidia/nemotron-3.5-lightning-30b-a3b',
   'nvidia/nemotron-nano-3-30b-a3b',
   'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'openai/gpt-oss-20b',

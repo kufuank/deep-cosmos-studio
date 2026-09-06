@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { MODELS } from '../lib/anthropic'
+import { useSettings } from '../lib/settings'
 import type { MessageRow } from '../lib/supabase'
 import { OPENING_HINT } from '../agents/instructions'
 import type { CardType } from '../schemas'
@@ -93,6 +95,10 @@ export function ChatPanel({
         {!busy && lastUsage && (
           <p className="text-[11px] text-slate-600 nums">{lastUsage}</p>
         )}
+        {/* The model belongs next to the conversation, not behind a settings
+            screen: the opening exchange wants a fast model and the sheet-filling
+            turns want a strong one, and that is a judgement made mid-thread. */}
+        {!busy && <ModelPicker />}
         {error && (
           <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2">
             <p className="text-sm text-red-300">{error}</p>
@@ -128,5 +134,32 @@ export function ChatPanel({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * Switching model is a per-turn decision, so it sits with the composer.
+ *
+ * Free-tier models differ far more in speed than in the quality that early,
+ * conversational turns need — a 3B-active model answers a clarifying question
+ * as well as a 120B one and does it in a fraction of the time.
+ */
+function ModelPicker() {
+  const { model, setModel } = useSettings()
+  return (
+    <label className="flex items-center gap-1.5 text-[11px] text-slate-600">
+      <span className="shrink-0">Model</span>
+      <select
+        className="input text-[11px] py-0.5 px-1.5 bg-transparent border-edge text-slate-500 hover:text-slate-300 transition-colors"
+        value={model}
+        onChange={(e) => setModel(e.target.value)}
+      >
+        {MODELS.filter((m) => !m.vision || m.id.startsWith('claude-')).map((m) => (
+          <option key={m.id} value={m.id}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }

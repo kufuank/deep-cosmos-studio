@@ -32,6 +32,11 @@ export const MODELS = [
     vision: false,
   },
   {
+    id: 'nvidia/nemotron-3.5-lightning-30b-a3b',
+    label: 'NVIDIA · Nemotron 3.5 Lightning 30B — ücretsiz, en hızlı',
+    vision: false,
+  },
+  {
     id: 'nvidia/nemotron-nano-3-30b-a3b',
     label: 'NVIDIA · Nemotron Nano 3 30B — ücretsiz, hızlı',
     vision: false,
@@ -604,6 +609,13 @@ export function createStreamAccumulator(handlers: StreamHandlers = {}) {
         stopReason = evt.delta?.stop_reason ?? stopReason
         // Output count is cumulative in message_delta — thinking included.
         if (typeof evt.usage?.output_tokens === 'number') usage.output = evt.usage.output_tokens
+        // Anthropic reports input in message_start; NIM only knows it once the
+        // stream ends, so it arrives here. Reading it only from message_start
+        // recorded every free-tier turn as zero input — which hid the one cost
+        // we control, the prompt we send.
+        if (typeof evt.usage?.input_tokens === 'number' && evt.usage.input_tokens > 0) {
+          usage.input = evt.usage.input_tokens
+        }
         break
       case 'error': {
         // Under load the API returns 200, opens the stream, and then writes
