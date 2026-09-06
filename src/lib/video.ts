@@ -32,6 +32,14 @@ export interface DetectionReport {
 
 /** Documentary shots run seconds, not minutes; longer usually means missed cuts. */
 const SUSPICIOUS_SHOT_SECONDS = 20
+/**
+ * Above this, a video that came back as a single shot is worth questioning.
+ *
+ * It used to share the 20-second bound, so an eight-second clip containing
+ * three cuts collapsed into one row and said nothing about it. Short clips are
+ * exactly where a missed cut hides.
+ */
+const SUSPICIOUS_SINGLE_SHOT_SECONDS = 6
 
 export function reviewDetection(shots: DetectedShot[], duration: number): DetectionReport {
   const lengths = shots.map((s) => s.endSeconds - s.startSeconds)
@@ -39,7 +47,7 @@ export function reviewDetection(shots: DetectedShot[], duration: number): Detect
   const average = lengths.length ? duration / lengths.length : 0
 
   let warning: string | null = null
-  if (shots.length <= 1 && duration > SUSPICIOUS_SHOT_SECONDS) {
+  if (shots.length <= 1 && duration > SUSPICIOUS_SINGLE_SHOT_SECONDS) {
     warning =
       'Hiç kesme bulunamadı ve video tek plan sayıldı. Video gerçekten tek çekimse sorun yok; değilse hassasiyeti düşürüp tekrar deneyin.'
   } else if (longest > SUSPICIOUS_SHOT_SECONDS) {
@@ -168,10 +176,46 @@ export function findCutIndices(deltas: number[], sensitivity = 1): number[] {
 }
 
 /** Mean absolute difference between two signatures, normalised to 0..1. */
-function signatureDelta(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+/** Luma histogram bins. 32 is fine enough to separate scenes, coarse enough
+ *  that a subject moving across frame lands in the same bins. */
+const HIST_BINS = 32
+
+/**
+ * Normalised luma histogram of one sampled frame.
+ *
+ * The previous measure was the mean absolute per-pixel luma difference, which
+ * answers "how much of the screen changed" — and that is not the question. A
+ * push-in, a subject crossing frame or drifting sparkles change most pixels
+ * without a cut, while a cut between two shots of the same set at the same
+ * exposure changes fewer. On busy footage ordinary motion therefore measured
+ * larger than the cuts, and no threshold can separate them.
+ *
+ * A histogram asks a different question: how the brightnesses are distributed,
+ * regardless of where they sit. Motion rearranges pixels and leaves the
+ * distribution alone; a cut replaces the content and changes it.
+ */
+export function lumaHistogram(data: Uint8ClampedArray): Float64Array {
+  const h = new Float64Array(HIST_BINS)
+  const pixels = data.length / 4
+  for (let i = 0; i < data.length; i += 4) {
+    const l = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+    h[Math.min(HIST_BINS - 1, Math.floor((l * HIST_BINS) / 256))]++
+  }
+  for (let i = 0; i < HIST_BINS; i++) h[i] /= pixels
+  return h
+}
+
+/** L1 distance halved, so identical frames score 0 and disjoint ones 1. */
+export function histogramDistance(a: Float64Array, b: Float64Array): number {
+  let sum = 0
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i])
+  return sum / 2
+}
+
+/** Kept for comparison in tests: what the detector used to measure. */
+export function pixelDelta(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
   let sum = 0
   for (let i = 0; i < a.length; i += 4) {
-    // Luma only: colour grading shifts should not read as cuts.
     const la = 0.299 * a[i] + 0.587 * a[i + 1] + 0.114 * a[i + 2]
     const lb = 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2]
     sum += Math.abs(la - lb)
@@ -223,16 +267,16 @@ export async function detectShots(
   const times: number[] = []
   for (let t = 0; t < duration; t += interval) times.push(t)
   const deltas: number[] = []
-  let prev: Uint8ClampedArray | null = null
+  let prev: Float64Array | null = null
 
   for (let i = 0; i < times.length; i++) {
     if (opts.signal?.aborted) throw new DOMException('aborted', 'AbortError')
     await seek(video, times[i])
     sigCtx.drawImage(video, 0, 0, SIGNATURE_W, SIGNATURE_H)
     const data = sigCtx.getImageData(0, 0, SIGNATURE_W, SIGNATURE_H).data
-    const copy = new Uint8ClampedArray(data)
-    deltas.push(prev ? signatureDelta(prev, copy) : 0)
-    prev = copy
+    const hist = lumaHistogram(data)
+    deltas.push(prev ? histogramDistance(prev, hist) : 0)
+    prev = hist
     opts.onProgress?.({ phase: 'sampling', done: i + 1, total: times.length })
   }
 

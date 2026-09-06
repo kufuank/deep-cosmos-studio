@@ -19,7 +19,15 @@ import { buildRequestBody, isTransient, AnthropicError, MODELS, supportsVision }
 import { DEFAULT_MODEL } from '../src/lib/settings'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
-import { formatTimecode, dataUrlParts, findCutIndices, framesForSpan } from '../src/lib/video'
+import {
+  formatTimecode,
+  dataUrlParts,
+  findCutIndices,
+  framesForSpan,
+  lumaHistogram,
+  histogramDistance,
+  pixelDelta,
+} from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
 import { createStreamAccumulator } from '../src/lib/anthropic'
 import { describeError, isAbort } from '../src/lib/errors'
@@ -941,6 +949,97 @@ console.log('\n== nvidia bridge: stream round-trip ==')
   check(
     'coverage never thins as a shot grows',
     [1, 2, 4, 8, 12, 30, 90].every((sp, i, a) => i === 0 || framesForSpan(sp) >= framesForSpan(a[i - 1])),
+  )
+}
+
+// A synthetic clip shaped like the footage that failed: three shots in eight
+// seconds, heavy motion inside each, and cuts between scenes that share a
+// palette. Frames are built rather than decoded so the measurement can be
+// tested without a browser.
+{
+  const W = 32,
+    H = 18
+  let seed = 7
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff)
+
+  /** One frame: a flat background with a bright object sitting at objX. */
+  function frame(bg: number, obj: number, objX: number, objW: number): Uint8ClampedArray {
+    const d = new Uint8ClampedArray(W * H * 4)
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const inside = x >= objX && x < objX + objW
+        // Jitter stands in for grain and sparkle: it moves pixels without
+        // moving the distribution much.
+        // Heavy jitter stands in for sparkle and grain: it moves a lot of",
+        // pixels without moving the distribution much.
+        const l = Math.max(0, Math.min(255, (inside ? obj : bg) + (rnd() - 0.5) * 70))
+        const i = (y * W + x) * 4
+        d[i] = d[i + 1] = d[i + 2] = l
+        d[i + 3] = 255
+      }
+    }
+    return d
+  }
+
+  // Three shots, eight samples each. Inside a shot the object sweeps across
+  // frame — the motion that used to read larger than the cuts.
+  // The hard case, and the real one: consecutive shots on the same set, at the
+  // same exposure. Only the framing changes, so the palette barely moves.
+  const shots = [
+    { bg: 60, obj: 225, objW: 8 },
+    { bg: 66, obj: 215, objW: 15 },
+    { bg: 58, obj: 230, objW: 4 },
+  ]
+  // Motion in real footage is not uniform: it stalls and bursts. That variance
+  // is what lifts a spread-based threshold above the cuts when the measure
+  // counts moving pixels.
+  const sweep = [0, 1, 1, 12, 13, 13, 24, 2]
+  const frames: Uint8ClampedArray[] = []
+  for (const sh of shots) {
+    for (let k = 0; k < sweep.length; k++) {
+      // Keep the object wholly in frame: letting it run off the edge changes
+      // how much of it is visible, which is a genuine content change and not
+      // the motion this is meant to model.
+      frames.push(frame(sh.bg, sh.obj, Math.min(sweep[k], W - sh.objW), sh.objW))
+    }
+  }
+  const cutsAt = [8, 16]
+
+  const histDeltas = [0]
+  const pixDeltas = [0]
+  for (let i = 1; i < frames.length; i++) {
+    histDeltas.push(histogramDistance(lumaHistogram(frames[i - 1]), lumaHistogram(frames[i])))
+    pixDeltas.push(pixelDelta(frames[i - 1], frames[i]))
+  }
+  const inShot = (xs: number[]) => xs.filter((_, i) => i > 0 && !cutsAt.includes(i))
+  const atCut = (xs: number[]) => cutsAt.map((i) => xs[i])
+  const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length
+
+  const histMotion = mean(inShot(histDeltas))
+  const histCut = Math.min(...atCut(histDeltas))
+  const pixMotion = mean(inShot(pixDeltas))
+  const pixCut = Math.min(...atCut(pixDeltas))
+  const found = findCutIndices(histDeltas)
+  const foundOld = findCutIndices(pixDeltas)
+
+  check(
+    'histogram separates a cut from motion',
+    histCut / histMotion > 2.5,
+    `${histMotion.toFixed(3)} motion vs ${histCut.toFixed(3)} cut`,
+  )
+  check(
+    'counting changed pixels does not',
+    pixCut / pixMotion < 1.5,
+    `${pixMotion.toFixed(3)} motion vs ${pixCut.toFixed(3)} cut`,
+  )
+  check('finds both cuts and nothing else', found.join(',') === cutsAt.join(','), found.join(',') || 'none')
+  // The regression itself: on this clip the old measure found no cut at all,
+  // and mistook the fastest motion for one. Every video came back as a single
+  // shot, which is what was reported.
+  check(
+    'the replaced measure could not do this',
+    foundOld.join(',') !== cutsAt.join(','),
+    foundOld.join(',') || 'none',
   )
 }
 
