@@ -19,7 +19,7 @@ import { buildRequestBody, isTransient, AnthropicError, MODELS, supportsVision }
 import { DEFAULT_MODEL } from '../src/lib/settings'
 import { agentInstructions, protocolText } from '../src/agents/instructions'
 import type { AgentConfig } from '../src/agents/config'
-import { formatTimecode, dataUrlParts, findCutIndices } from '../src/lib/video'
+import { formatTimecode, dataUrlParts, findCutIndices, framesForSpan } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
 import { createStreamAccumulator } from '../src/lib/anthropic'
 import { describeError, isAbort } from '../src/lib/errors'
@@ -928,6 +928,20 @@ console.log('\n== nvidia bridge: stream round-trip ==')
 
   const empty = toAnthropicError(500, '') as any
   check('an empty body still says something', empty.error.message.length > 0, empty.error.message)
+}
+
+// Motion only exists between frames. Three stills across an eight-second take
+// is what made the model answer with two contradictory camera movements.
+{
+  check('a one-second shot still gets the floor', framesForSpan(1) === 3, String(framesForSpan(1)))
+  check('four seconds gets at least three', framesForSpan(4) >= 3, String(framesForSpan(4)))
+  check('eight seconds gets six', framesForSpan(8) === 6, String(framesForSpan(8)))
+  check('ten seconds gets seven', framesForSpan(10) === 7, String(framesForSpan(10)))
+  check('a long take is capped', framesForSpan(600) === 10, String(framesForSpan(600)))
+  check(
+    'coverage never thins as a shot grows',
+    [1, 2, 4, 8, 12, 30, 90].every((sp, i, a) => i === 0 || framesForSpan(sp) >= framesForSpan(a[i - 1])),
+  )
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

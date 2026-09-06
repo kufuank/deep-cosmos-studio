@@ -1,4 +1,4 @@
-import { callAnthropic } from '../lib/anthropic'
+import { callAnthropic, isFreeProvider } from '../lib/anthropic'
 import type { ContentBlock, ToolDef, Usage } from '../lib/anthropic'
 import { supabase } from '../lib/supabase'
 import { dataUrlParts, formatTimecode } from '../lib/video'
@@ -195,11 +195,12 @@ ${shot.frames.length} frames follow, sampled in chronological order from inside 
     system,
     messages: [{ role: 'user', content }],
     tools: [recordShotTool],
-    // Perception, not reasoning: low effort keeps thinking spend small. The
-    // cap still has to hold thinking + the 15-field tool call — 2000 was
-    // enough before thinking was on by default, not any more.
+    // Perception, not reasoning: low effort keeps thinking spend small — but
+    // only on Anthropic. NIM has no equivalent dial and the vision model on it
+    // is a reasoning model, which spent 6.8k output tokens describing three
+    // stills. The cap has to clear that, or the tool call is cut off mid-JSON.
     effort: 'low',
-    maxTokens: 6000,
+    maxTokens: isFreeProvider(params.model) ? 14000 : 6000,
     signal: params.signal,
   })
 
@@ -213,9 +214,23 @@ ${shot.frames.length} frames follow, sampled in chronological order from inside 
 
   const raw = call.input as Partial<Record<keyof ShotAnalysis, unknown>>
   const out = {} as ShotAnalysis
+  let filled = 0
   for (const k of FIELDS) {
     const v = raw[k]
     out[k] = typeof v === 'string' ? v : ''
+    if (out[k]) filled++
+  }
+
+  // A tool call cut off mid-JSON does not fail — it parses to nothing, and the
+  // fields then read as empty strings. Written to the table that is a row of
+  // blanks with a real timecode on it, which looks like a bad model rather
+  // than a truncated response. Refuse it instead.
+  if (res.stopReason === 'max_tokens' || filled < FIELDS.length / 2) {
+    throw new Error(
+      `Plan ${shot.index + 1} çözümlenemedi: modelin cevabı ${
+        res.stopReason === 'max_tokens' ? 'token sınırında kesildi' : 'eksik geldi'
+      } (${filled}/${FIELDS.length} alan). Daha hızlı bir görsel model deneyin.`,
+    )
   }
   // The protocol forbids inventing audio observations from silent frames.
   if (!out.audio_notes) out.audio_notes = 'Cannot be determined (no audio supplied)'

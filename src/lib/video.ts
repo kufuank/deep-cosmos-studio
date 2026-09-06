@@ -59,7 +59,31 @@ const SIGNATURE_H = 18
 /** Shots shorter than this are treated as detection noise and merged. */
 const MIN_SHOT_SECONDS = 0.45
 /** Upper bound on frames sent per shot, to keep request payloads sane. */
-const MAX_FRAMES_PER_SHOT = 6
+const MAX_FRAMES_PER_SHOT = 10
+/**
+ * Seconds of shot each sampled frame is expected to account for.
+ *
+ * This was 4, which is fine when a shot is a couple of seconds long but not
+ * when a whole clip is one shot: an eight-second take arrived as three stills
+ * four seconds apart, and the model was then asked for a single camera
+ * movement and a single action. It answered with contradictions — "Push In,
+ * Pull Back" — because that is what three disconnected stills look like.
+ */
+const SECONDS_PER_FRAME = 1.5
+
+/**
+ * How many stills to sample from a shot of this length.
+ *
+ * Exported so the rule can be tested without a browser: it is plain
+ * arithmetic, and getting it wrong does not throw — it just quietly starves
+ * the model of the frames it needs to describe motion.
+ */
+export function framesForSpan(span: number, floor = 3): number {
+  return Math.max(
+    1,
+    Math.min(MAX_FRAMES_PER_SHOT, Math.max(floor, Math.ceil(span / SECONDS_PER_FRAME))),
+  )
+}
 
 export function formatTimecode(seconds: number): string {
   const s = Math.max(0, seconds)
@@ -238,10 +262,10 @@ export async function detectShots(
     const inset = Math.min(0.12, span * 0.15)
     const from = s.startSeconds + inset
     const to = Math.max(from, s.endSeconds - inset)
-    // Longer spans get more frames. If a cut was missed, this at least gives the
-    // model enough coverage to describe what it is actually looking at rather
-    // than extrapolating across minutes from three stills.
-    const n = Math.max(1, Math.min(MAX_FRAMES_PER_SHOT, Math.max(framesPerShot, Math.ceil(span / 4))))
+    // Longer spans get more frames. Motion is the thing being described, and it
+    // only exists between frames — too few and the model is extrapolating, not
+    // observing.
+    const n = framesForSpan(span, framesPerShot)
     for (let k = 0; k < n; k++) {
       const t = n === 1 ? (from + to) / 2 : from + ((to - from) * k) / (n - 1)
       await seek(video, t)
