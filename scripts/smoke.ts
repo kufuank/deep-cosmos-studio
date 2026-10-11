@@ -29,6 +29,8 @@ import {
   pixelDelta,
 } from '../src/lib/video'
 import { recordShotTool } from '../src/agents/deconstruct'
+import { captionsForSpan, captionAudioNotes, sourceKindFor } from '../src/lib/fetchHelper'
+import type { CaptionSegment } from '../src/lib/fetchHelper'
 import { createStreamAccumulator } from '../src/lib/anthropic'
 import { describeError, isAbort } from '../src/lib/errors'
 import {
@@ -1041,6 +1043,35 @@ console.log('\n== nvidia bridge: stream round-trip ==')
     foundOld.join(',') !== cutsAt.join(','),
     foundOld.join(',') || 'none',
   )
+}
+
+console.log('\n== link sources and captions ==')
+{
+  check('youtube.com is youtube', sourceKindFor('https://www.youtube.com/watch?v=x') === 'youtube')
+  check('youtu.be is youtube', sourceKindFor('https://youtu.be/x') === 'youtube')
+  check('m.youtube.com is youtube', sourceKindFor('https://m.youtube.com/watch?v=x') === 'youtube')
+  check('instagram is url', sourceKindFor('https://www.instagram.com/reel/x/') === 'url')
+  check('look-alike host is not youtube', sourceKindFor('https://notyoutube.com/x') === 'url')
+  check('garbage is url', sourceKindFor('not a link') === 'url')
+
+  const cues: CaptionSegment[] = [
+    { start: 6.52, end: 10.04, text: 'Trees that looked lifeless' },
+    { start: 10.04, end: 14, text: 'are now  revived\nand green.' },
+    { start: 30, end: 33, text: 'A rival male.' },
+  ]
+  check(
+    'cue straddling the cut belongs to both shots',
+    captionsForSpan(cues, 0, 8) === 'Trees that looked lifeless' &&
+      captionsForSpan(cues, 8, 12).startsWith('Trees that looked lifeless are now'),
+  )
+  check('whitespace is normalised', captionsForSpan(cues, 11, 12) === 'are now revived and green.')
+  check('touching edges do not overlap', captionsForSpan(cues, 14, 30) === '', captionsForSpan(cues, 14, 30))
+  const said = captionAudioNotes(cues, 29, 34, 'captions (en-GB, manual)') ?? ''
+  check('speech is quoted with its source', said.includes('"A rival male."') && said.includes('en-GB'), said)
+  check('music stays undetermined', said.includes('cannot be determined'))
+  const quiet = captionAudioNotes(cues, 15, 25, 'captions (en-GB, manual)') ?? ''
+  check('silent span says so, without inventing audio', quiet.startsWith('No captioned speech'), quiet)
+  check('no captions leaves the analysis untouched', captionAudioNotes([], 0, 5, null) === null)
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

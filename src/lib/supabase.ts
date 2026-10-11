@@ -59,7 +59,7 @@ export interface ShotListRow {
   id: string
   owner: string
   title: string
-  source_kind: 'file' | 'youtube'
+  source_kind: 'file' | 'youtube' | 'url'
   source_ref: string
   duration_seconds: number | null
   status: 'draft' | 'analyzing' | 'ready' | 'locked' | 'failed'

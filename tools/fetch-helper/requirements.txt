@@ -1,0 +1,5 @@
+# Yerel video getirme yardımcısı. Sunucunun kendisi yalnızca standart kütüphane kullanır;
+# bunlar çağırdığı araçlardır.
+yt-dlp[default,curl-cffi]   # sürüm sabitleme yok: siteler eski sürümleri kırar, güncel tutun
+deno>=2.0                   # yt-dlp'nin YouTube JS çözücüsü
+imageio-ffmpeg>=0.5         # ffmpeg yoksa yedek (yt-dlp ses+görüntüyü birleştirir)

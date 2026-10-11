@@ -26,6 +26,7 @@ npm install
 npm run dev      # geliştirme
 npm run smoke    # 129 mantık testi
 npm run deploy   # test → derleme → gh-pages
+npm run fetch-helper  # linkten referans video için yerel yardımcı (ayrı pencerede)
 ```
 
 ---
@@ -52,6 +53,15 @@ koddaki sabitleri ezer — protokol değişince **her ikisini** güncelleyin).
 Ölçek notu: indeks plan başına ~30 token; ~1500 planın üstünde bir
 ön-eleme/retrieval aşaması gerekir. **Sıradaki iş:** Mete'nin yeni sürümle
 tekrar denemesi; sahne sayısı = seçili plan sayısı ve süreler korunuyor mu.
+
+**Eklendi (11 Ekim):** Shot Library'ye **link ile** referans video (YouTube,
+Instagram, TikTok, Vimeo, doğrudan mp4). İndirmeyi kullanıcının bilgisayarındaki
+yerel yardımcı yapar (`tools/fetch-helper`, `npm run fetch-helper`); video tarayıcıya
+`File` olarak döner ve yükleme yolundan hiç ayrılmaz. Videonun kendi altyazısı varsa
+her planın `audio_notes` alanına o plan sırasında söylenen anlatım yazılır (müzik/ortam
+yine "belirlenemez"). `source_kind` artık `file | youtube | url` (migration 007).
+Kaynak: emekli faz 2 reposunda (`kufuank/deep-cosmos`) denenen claude-video "watch"
+entegrasyonu buraya taşındı.
 
 **Hiç yok:** Video Prompt ajanı (doküman 6), render hattı (Higgsfield/Seedance),
 reference library retrieval, uygulama içi görsel üretimi. `dc_assets` ve
@@ -187,6 +197,21 @@ Ayrica NIM hata mesajini `{detail}`, `{message}` ya da `{title}` altinda
 yazar; Anthropic bicimini bekleyen istemci hicbirini okuyamayip ekrana
 "Sunucu hatasi (410)" basiyordu. `toAnthropicError` artik hepsini tek bicime
 cevirir, 404/410 icin de modelin adini soyler.
+
+**Linkten video yalnızca kullanıcının bilgisayarında indirilebilir.** yt-dlp
+tarayıcıda çalışmaz; Edge Function'a taşımak da işe yaramaz, YouTube veri merkezi
+IP'lerini "bot musun" ile durdurur. Bu yüzden yardımcı yereldir ve yalnızca
+`127.0.0.1`'e bağlanır, yalnızca stüdyonun adreslerine CORS verir. Yayındaki siteden
+(github.io) yerel adrese istekte Chrome bir kez "yerel ağ erişimi" izni sorar;
+yardımcı `Access-Control-Allow-Private-Network` başlığını gönderir.
+
+**TLS'i kesen ortamda yt-dlp sertifika hatası verir — doğrulamayı kapatmayın.**
+yt-dlp certifi'ye güvenir; kurumsal proxy'nin kökü yalnızca Windows deposundadır.
+Yardımcı iki yerden çözer: kendi ürettiği yt-dlp config'iyle `--compat-options
+no-certifi` (Python istekleri işletim sistemi deposunu kullanır) ve YouTube
+altyazısını çeken tarayıcı-taklit istekleri (curl_cffi) için certifi + Windows
+köklerinden birleşik bir `CURL_CA_BUNDLE`. Biri eksik kalırsa meta veri gelir ama
+altyazı ya da video düşer.
 
 **Yayın bazen GitHub tarafında düşer.** 6 Ağustos'ta üç gün runner alınamadı.
 Kod tarafı değil; şununla yeniden tetiklenir:

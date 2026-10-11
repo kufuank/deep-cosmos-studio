@@ -9,6 +9,8 @@ import { recordUsage } from '../lib/usage'
 import { useSettings } from '../lib/settings'
 import { visionModelFor, isFreeProvider, FREE_TIER_MIN_GAP_MS } from '../lib/anthropic'
 import { describeError, isAbort } from '../lib/errors'
+import { captionAudioNotes, fetchFromUrl } from '../lib/fetchHelper'
+import type { FetchedVideo } from '../lib/fetchHelper'
 import { ShotTable } from './ShotTable'
 
 interface Progress {
@@ -27,6 +29,7 @@ export function ShotLibrary({ session }: { session: Session }) {
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
   const [sensitivity, setSensitivity] = useState(1)
   const [report, setReport] = useState<DetectionReport | null>(null)
+  const [linkUrl, setLinkUrl] = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
   const playerRef = useRef<HTMLVideoElement>(null)
@@ -78,9 +81,30 @@ export function ShotLibrary({ session }: { session: Session }) {
     }
   }, [videoUrl])
 
-  async function handleFile(file: File) {
+  // A link is downloaded by the local helper, then follows the upload path unchanged.
+  async function handleUrl() {
+    const url = linkUrl.trim()
+    if (!url) return
     setError(null)
     const controller = new AbortController()
+    abortRef.current = controller
+    let fetched: FetchedVideo
+    try {
+      setProgress({ label: 'Video linkten indiriliyor', done: 0, total: 1 })
+      fetched = await fetchFromUrl(url, controller.signal)
+    } catch (e) {
+      setError(isAbort(e) ? 'İndirme durduruldu.' : describeError(e))
+      setProgress(null)
+      abortRef.current = null
+      return
+    }
+    setLinkUrl('')
+    await handleFile(fetched.file, fetched, controller)
+  }
+
+  async function handleFile(file: File, source?: FetchedVideo, existing?: AbortController) {
+    setError(null)
+    const controller = existing ?? new AbortController()
     abortRef.current = controller
 
     let listId: string | null = null
@@ -93,9 +117,9 @@ export function ShotLibrary({ session }: { session: Session }) {
         .from('dc_shot_lists')
         .insert({
           owner: session.user.id,
-          title: file.name,
-          source_kind: 'file',
-          source_ref: file.name,
+          title: source?.title ?? file.name,
+          source_kind: source?.sourceKind ?? 'file',
+          source_ref: source?.sourceUrl ?? file.name,
           duration_seconds: video.duration,
           status: 'analyzing',
         })
@@ -163,6 +187,10 @@ export function ShotLibrary({ session }: { session: Session }) {
         })
         recordUsage({ kind: 'shot_analysis', agent: 'deconstruction', model: analysisModel, effort: 'low', requests: 1, usage })
         previous = shotSummary(analysis)
+        // The frames are silent, but a link's captions are real evidence of what is said.
+        const heard = source
+          ? captionAudioNotes(source.transcript, d.startSeconds, d.endSeconds, source.transcriptSource)
+          : null
 
         const { data: row, error: insErr } = await supabase
           .from('dc_shots')
@@ -175,6 +203,7 @@ export function ShotLibrary({ session }: { session: Session }) {
             timecode_start: formatTimecode(d.startSeconds),
             timecode_end: formatTimecode(d.endSeconds),
             ...analysis,
+            ...(heard ? { audio_notes: heard } : {}),
           })
           .select()
           .single()
@@ -231,6 +260,30 @@ export function ShotLibrary({ session }: { session: Session }) {
         >
           + Referans video
         </button>
+        <form
+          className="mb-2"
+          onSubmit={(e) => {
+            e.preventDefault()
+            void handleUrl()
+          }}
+        >
+          <input
+            className="input text-xs py-1"
+            type="url"
+            placeholder="ya da YouTube / Instagram / TikTok linki"
+            value={linkUrl}
+            disabled={busy}
+            onChange={(e) => setLinkUrl(e.target.value)}
+          />
+          <button
+            type="submit"
+            className="btn-ghost w-full text-xs py-1 mt-1"
+            disabled={busy || !linkUrl.trim()}
+            title="Yerel video yardımcısı gerekir: npm run fetch-helper"
+          >
+            Linkten getir
+          </button>
+        </form>
 
         <label className="label mt-2">Kesme hassasiyeti</label>
         <select
@@ -257,8 +310,10 @@ export function ShotLibrary({ session }: { session: Session }) {
 
         {lists.length === 0 && !busy && (
           <p className="text-[11px] text-slate-600 leading-relaxed">
-            Bir belgesel klibi yükleyin. Kesmeler tarayıcıda ölçülür, her plan ayrı ayrı
-            çözümlenip 16 kolonluk shot list'e dönüştürülür.
+            Bir belgesel klibi yükleyin ya da linkini yapıştırın. Kesmeler tarayıcıda
+            ölçülür, her plan ayrı ayrı çözümlenip 16 kolonluk shot list'e dönüştürülür.
+            Linkler bilgisayarınızdaki yardımcıyla indirilir (<code>npm run fetch-helper</code>);
+            videonun altyazısı varsa planlardaki anlatım da kaydedilir.
           </p>
         )}
 
