@@ -49,6 +49,8 @@ Ayarlar: `DC_FETCH_PORT` (port), `DC_FETCH_ORIGINS` (virgülle ek izinli adresle
 | "Yerel video yardımcısına ulaşılamadı" | `npm run fetch-helper` açık mı? Tarayıcı izin istediyse verdiniz mi? |
 | 403 / "Sign in to confirm you're not a bot" | yt-dlp'yi güncelleyin: `python -m pip install -U "yt-dlp[default,curl-cffi]"` |
 | `CERTIFICATE_VERIFY_FAILED` | Kesen proxy'nin kök sertifikası Windows deposunda olmalı. Doğrulamayı kapatmayın. |
+| pip kurulumunda `CERTIFICATE_VERIFY_FAILED` | `truststore` kuruluysa `python -m pip install --use-feature=truststore -r ...`. Değilse Windows köklerini dışa aktarıp verin: `python -c "import ssl;open('roots.pem','w').write(''.join(ssl.DER_cert_to_PEM_cert(d) for s in ('ROOT','CA') for d,e,_ in ssl.enum_certificates(s) if e=='x509_asn'))"` ardından `python -m pip install --cert roots.pem -r ...`. `--trusted-host` kullanmayın. |
+| `Could not open requirements file` / `Missing script: fetch-helper` | Komutları stüdyo klasöründe (`deep-cosmos-studio`) çalıştırın. |
 
 İndirme kısmı [bradautomates/claude-video](https://github.com/bradautomates/claude-video)
 "watch" betiklerini kullanır (MIT, `watch/VENDORED.md`).
