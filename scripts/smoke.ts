@@ -1082,6 +1082,21 @@ console.log('\n== link sources and captions ==')
   const quiet = captionAudioNotes(cues, 15, 25, 'captions (en-GB, manual)') ?? ''
   check('silent span says so, without inventing audio', quiet.startsWith('No captioned speech'), quiet)
   check('no captions leaves the analysis untouched', captionAudioNotes([], 0, 5, null) === null)
+
+  // Auto captions tag non-speech; a tag is not something the narrator says.
+  const tagged: CaptionSegment[] = [
+    { start: 0, end: 3, text: '[Müzik]' },
+    { start: 3, end: 6, text: '[Müzik] Güneyli kızıl arı kuşları' },
+    { start: 6, end: 9, text: '[Alkış]' },
+  ]
+  const onlyMusic = captionAudioNotes(tagged, 0, 2, 'captions (tr, automatic)') ?? ''
+  check('a music tag is not quoted as speech', onlyMusic.startsWith('No captioned speech') && !onlyMusic.includes('"'), onlyMusic)
+  check('a music tag marks music as present', onlyMusic.includes('Music: present') && !onlyMusic.includes('Music cannot'), onlyMusic)
+  const mixed = captionAudioNotes(tagged, 3, 5, 'captions (tr, automatic)') ?? ''
+  check('speech beside a tag keeps only the words', mixed.includes('"Güneyli kızıl arı kuşları"'), mixed)
+  const cue = captionAudioNotes(tagged, 6, 8, 'captions (tr, automatic)') ?? ''
+  check('other tags are reported as sound cues', cue.includes('Sound cues in captions: [Alkış]') && cue.includes('Music cannot'), cue)
+  check('ambience stays undetermined', [onlyMusic, mixed, cue].every((n) => n.includes('Ambience cannot be determined')))
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

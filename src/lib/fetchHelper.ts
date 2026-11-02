@@ -49,13 +49,31 @@ export function captionsForSpan(segments: CaptionSegment[], start: number, end: 
     .join(' ')
 }
 
+/** Bracketed sound tags ("[Müzik]", "[Applause]") and the ♪ music glyph. */
+const SOUND_TAG = /\[[^\]]*\]|♪+/g
+const MUSIC_TAG = /müzik|muzik|music|♪/i
+
+/**
+ * Splits caption text into what is spoken and the sound tags around it.
+ *
+ * Auto captions mark non-speech with tags such as "[Müzik]". Quoted as speech,
+ * that read as the narrator saying "[Müzik]" followed by "music cannot be
+ * determined" — a note that contradicted itself.
+ */
+export function splitCaptionText(text: string): { speech: string; tags: string[] } {
+  const tags = [...new Set((text.match(SOUND_TAG) ?? []).map((t) => t.trim()))]
+  const speech = text.replace(SOUND_TAG, ' ').replace(/\s+/g, ' ').trim()
+  return { speech, tags }
+}
+
 /**
  * audio_notes for a shot when the video came with captions.
  *
- * Captions are evidence of what is said, not of music or ambience, so only the
- * speech is reported and everything else stays undetermined, as the protocol
- * requires. Returns null when there are no captions at all, which leaves the
- * analysis's own "cannot be determined" in place.
+ * Captions are evidence of what is said, and their sound tags show that music
+ * is present — but not what it sounds like, and nothing about ambience. Those
+ * stay undetermined, as the protocol requires. Returns null when there are no
+ * captions at all, which leaves the analysis's own "cannot be determined" in
+ * place.
  */
 export function captionAudioNotes(
   segments: CaptionSegment[],
@@ -65,10 +83,21 @@ export function captionAudioNotes(
 ): string | null {
   if (!segments.length) return null
   const label = source ?? 'captions'
-  const said = captionsForSpan(segments, start, end)
-  return said
-    ? `Voice-over/dialogue (from ${label}): "${said}" Music and ambience cannot be determined.`
-    : `No captioned speech in this span (${label}). Music and ambience cannot be determined.`
+  const { speech, tags } = splitCaptionText(captionsForSpan(segments, start, end))
+  const music = tags.filter((t) => MUSIC_TAG.test(t))
+  const other = tags.filter((t) => !MUSIC_TAG.test(t))
+
+  const parts = [
+    speech
+      ? `Voice-over/dialogue (from ${label}): "${speech}"`
+      : `No captioned speech in this span (${label}).`,
+    music.length
+      ? `Music: present (captions mark ${music.join(' ')}); its character cannot be determined.`
+      : 'Music cannot be determined.',
+    ...(other.length ? [`Sound cues in captions: ${other.join(' ')}.`] : []),
+    'Ambience cannot be determined.',
+  ]
+  return parts.join(' ')
 }
 
 async function helperError(res: Response): Promise<Error> {
