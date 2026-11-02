@@ -109,8 +109,12 @@ def prepare_environment() -> dict[str, Any]:
             _prepend_path(Path(scripts))
 
     ffmpeg = resolve_ffmpeg()
-    lines = ["# deep-cosmos fetch-helper tarafından üretildi; elle düzenlemeyin.",
-             "--compat-options no-certifi"]   # Python tarafı: işletim sistemi sertifika deposu
+    lines = ["# deep-cosmos fetch-helper tarafından üretildi; elle düzenlemeyin."]
+    # Python tarafı: Windows'ta işletim sistemi sertifika deposu (TLS'i kesen proxy'nin
+    # kökü oradadır). macOS'ta python.org Python'unun deposu "Install Certificates"
+    # çalıştırılmadan boştur; orada certifi'de kalınır.
+    if sys.platform == "win32":
+        lines.append("--compat-options no-certifi")
     if ffmpeg:
         if Path(ffmpeg).stem.lower() == "ffmpeg":
             _prepend_path(Path(ffmpeg).resolve().parent)
