@@ -23,6 +23,8 @@ export interface AnthropicRequest {
   tools?: AnthropicToolDef[]
   max_tokens?: number
   stream?: boolean
+  /** The client's effort dial; on NIM only 'low' changes anything (see below). */
+  effort?: string
 }
 
 /**
@@ -149,11 +151,34 @@ export function toOpenAIMessages(req: AnthropicRequest): OpenAIMessage[] {
   return out
 }
 
+/**
+ * Thinking caps for NIM reasoning models on low-effort requests.
+ *
+ * Shot analysis is perception, not reasoning, but the vision model thinks
+ * uncapped by default. Non-streaming, nothing comes back until it is done, and
+ * on 30 Oct the first shot of a library run thought past the edge function's
+ * 150 s wall-clock limit — the user saw only "not enough compute resources".
+ * NVIDIA's own example for this model passes `reasoning_budget`; other models
+ * are left alone, since an unknown field may be rejected outright.
+ */
+export const LOW_EFFORT_REASONING_BUDGET: Record<string, number> = {
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning': 2048,
+}
+
+/** Provider-specific fields that cap thinking; empty when none apply. */
+export function reasoningExtras(model: string, effort?: string): Record<string, unknown> {
+  const budget = effort === 'low' ? LOW_EFFORT_REASONING_BUDGET[model] : undefined
+  return budget
+    ? { chat_template_kwargs: { enable_thinking: true }, reasoning_budget: budget }
+    : {}
+}
+
 export function toOpenAIRequest(req: AnthropicRequest, maxTokens: number): Record<string, unknown> {
   return {
     model: req.model,
     messages: toOpenAIMessages(req),
     max_tokens: maxTokens,
+    ...reasoningExtras(req.model, req.effort),
     ...(req.tools?.length
       ? {
           tools: req.tools.map((t) => ({

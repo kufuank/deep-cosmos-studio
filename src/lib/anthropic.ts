@@ -405,6 +405,9 @@ export function isTransient(e: unknown): boolean {
   // like an overload instead of surfacing as an error.
   if (e.status === 429) return true
   if (e.status === 529 || e.status === 500 || e.status === 502 || e.status === 503) return true
+  // 504: the edge function gave up on a slow upstream. 546: Supabase killed
+  // the worker at its wall-clock limit before that could happen.
+  if (e.status === 504 || e.status === 546) return true
   return e.kind === 'overloaded_error' || e.kind === 'api_error'
 }
 

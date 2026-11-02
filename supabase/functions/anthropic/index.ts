@@ -39,6 +39,10 @@ const NVIDIA_URL = 'https://integrate.api.nvidia.com/v1/chat/completions'
 // by default. 16000 proved too tight for "fill the whole sheet" turns, where
 // thinking alone can pass 8k tokens before the first tool call.
 const MAX_TOKENS_CAP = 32000
+// The worker is killed at 150 s wall clock (free plan), and the client then
+// sees only "not enough compute resources". A non-streaming call that has not
+// answered by this point is abandoned so the client gets a 504 it can retry.
+const NON_STREAM_TIMEOUT_MS = 135_000
 
 const ALLOWED_ORIGINS = [
   'https://kufuank.github.io',
@@ -235,20 +239,40 @@ Deno.serve(async (req: Request) => {
         tools: payload.tools as never,
         max_tokens: maxTokens,
         stream,
+        effort: payload.output_config?.effort,
       },
       maxTokens,
     )
-    try {
-      upstream = await fetch(NVIDIA_URL, {
+    const deadline = stream ? undefined : AbortSignal.timeout(NON_STREAM_TIMEOUT_MS)
+    const send = (body: Record<string, unknown>) =>
+      fetch(NVIDIA_URL, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
           authorization: `Bearer ${apiKey}`,
           accept: stream ? 'text/event-stream' : 'application/json',
         },
-        body: JSON.stringify(oa),
+        body: JSON.stringify(body),
+        signal: deadline,
       })
+    try {
+      upstream = await send(oa)
+      // The thinking cap is a provider-specific field. If the endpoint refuses
+      // it, the request is worth more uncapped than not at all.
+      if ((upstream.status === 400 || upstream.status === 422) && 'reasoning_budget' in oa) {
+        const { reasoning_budget: _b, chat_template_kwargs: _k, ...plain } = oa
+        upstream = await send(plain)
+      }
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'TimeoutError') {
+        return json(
+          {
+            error: `Model ${NON_STREAM_TIMEOUT_MS / 1000} sn icinde yanit vermedi (NVIDIA ucretsiz katman yogun olabilir).`,
+          },
+          504,
+          origin,
+        )
+      }
       // Saying only "unreachable" hid the actual fault for a whole round trip.
       const why = e instanceof Error ? e.message : String(e)
       return json({ error: `NVIDIA NIM'e ulasilamadi: ${why}` }, 502, origin)

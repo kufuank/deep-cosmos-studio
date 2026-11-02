@@ -435,6 +435,8 @@ console.log('\n== stream accumulator ==')
   check('auth errors are not retried', !isTransient(new AnthropicError('x', 401)))
   check('validation errors are not retried', !isTransient(new AnthropicError('x', 400)))
   check('529 status is retried', isTransient(new AnthropicError('x', 529)))
+  check('edge timeout (504) is retried', isTransient(new AnthropicError('x', 504)))
+  check('worker wall-clock kill (546) is retried', isTransient(new AnthropicError('x', 546)))
 }
 
 check(
@@ -840,6 +842,14 @@ console.log('\n== nvidia bridge: request translation ==')
   check('tools become OpenAI functions', body.tools[0].function.name === 'set_fields')
   check('schema is carried over as parameters', body.tools[0].function.parameters.type === 'object')
   check('usage is requested so cost stays measurable', body.stream_options?.include_usage === true)
+  check('no thinking cap without low effort', !('reasoning_budget' in body))
+
+  const vision = 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning'
+  const capped = toOpenAIRequest({ ...req, model: vision, effort: 'low' }, 14000) as any
+  check('low-effort shot analysis caps thinking', capped.reasoning_budget > 0 && capped.reasoning_budget < 14000)
+  check('thinking stays on under the cap', capped.chat_template_kwargs?.enable_thinking === true)
+  const other = toOpenAIRequest({ ...req, model: 'meta/llama-3.2-90b-vision-instruct', effort: 'low' }, 14000) as any
+  check('models without a known cap get no extra fields', !('reasoning_budget' in other))
 }
 
 console.log('\n== nvidia bridge: stream round-trip ==')
