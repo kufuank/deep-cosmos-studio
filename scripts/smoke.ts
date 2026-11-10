@@ -13,6 +13,12 @@ import {
   libraryBlock,
   selectedSequenceBlock,
   selectSequenceTool,
+  announcesAction,
+  claimsComplete,
+  missingFieldKeys,
+  cutoffNotice,
+  incompleteNotice,
+  TURN_DISCIPLINE,
 } from '../src/agents/runner'
 import type { ShotContext, LibraryList } from '../src/agents/runner'
 import { buildRequestBody, isTransient, AnthropicError, MODELS, supportsVision } from '../src/lib/anthropic'
@@ -1097,6 +1103,51 @@ console.log('\n== link sources and captions ==')
   const cue = captionAudioNotes(tagged, 6, 8, 'captions (tr, automatic)') ?? ''
   check('other tags are reported as sound cues', cue.includes('Sound cues in captions: [Alkış]') && cue.includes('Music cannot'), cue)
   check('ambience stays undetermined', [onlyMusic, mixed, cue].every((n) => n.includes('Ambience cannot be determined')))
+}
+
+{
+  console.log('\nturn honesty — announced-but-not-done, false completion, cut-off notices')
+  // Real closing lines from turns that ended without doing what they promised.
+  const stalls = [
+    'Kryptos Prime için tutarlı bir ekosistem tasarlıyorum. Önce temel çerçeve alanlarını, sonra türetilen alanları dolduracağım.',
+    'Şimdi düzelteyim: etkileşimi analiz edip aracı çağırayım.',
+    'Haklısın, aracı çağırmadan "düzeltiyorum" demişim. Şimdi çağırıyorum.',
+    'Aşağıdaki set_fields çağrısı ile temel alan ve kontekst alanlarını belirliyorum:',
+    'Mekanı kilitlemek için en fazla 4 hedefli soru soruyorum — cevaplar birden çok alanı aynı anda çözecek:',
+    "I'll fill in the remaining fields now.",
+  ]
+  for (const s of stalls) check(`stall detected: ${s.slice(0, 40)}…`, announcesAction(s), s)
+  const fine = [
+    'Onay bekliyorum. Değişiklik istiyorsanız hangi alanların nasıl düzeltileceğini yazın.',
+    'Aşağıdaki dört soruyu yanıtlar mısınız?',
+    'Anlıyorum, bu değerleri ekosistem kartına dayandırdım.',
+    '',
+  ]
+  for (const s of fine) check(`not a stall: ${s.slice(0, 40) || '(empty)'}`, !announcesAction(s), s)
+
+  check('"Kart tamam." is a completion claim', claimsComplete('Kart tamam. Kullanıcı onayı bekleniyor.'))
+  check('"Tüm 31 alan dolduruldu" is a completion claim', claimsComplete('Tüm 31 alan dolduruldu. Hepsi inferred.'))
+  check('"bütün kart doldurulmuş" is a completion claim', claimsComplete('Artık bütün kart doldurulmuş.'))
+  check('a question is not a completion claim', !claimsComplete('Hangi trofik seviyeyi tercih edersiniz?'))
+
+  const ecoAll = allFields(schemas.ecosystem)
+  const nearly: CardFields = {}
+  for (const f of ecoAll.slice(0, -6)) nearly[f.key] = { value: 'x', state: 'inferred' }
+  const miss = missingFieldKeys('ecosystem', nearly)
+  check('missing keys are the empty ones', miss.length === 6 && miss[0] === ecoAll[ecoAll.length - 6].key, miss.join(','))
+  const note = incompleteNotice('ecosystem', miss)
+  check('incomplete notice names count and labels', note.includes('6 alan hâlâ boş') && note.includes(ecoAll[ecoAll.length - 1].label), note)
+
+  check('truncation notice says the answer was too long', cutoffNotice('truncated').includes('Cevap çok uzun'))
+  check('empty truncation says nothing was done', cutoffNotice('truncated_empty').includes('hiçbir işlem yapılmadı'))
+  check('step limit is explained', cutoffNotice('step_limit').includes('adımın hepsini kullandı'))
+  check('stall is explained', cutoffNotice('stalled').includes('gerçekleştirmeden'))
+
+  const sysEco = buildSystemPrompt('ecosystem', {}, {}, cfg('ecosystem'))
+  check('turn discipline is in every agent prompt', sysEco.includes(TURN_DISCIPLINE))
+  check('unlocked card explains the proposal tool is not yet available', sysEco.includes('CARD STATE — UNLOCKED') && sysEco.includes('Kartı kilitle'))
+  const sysLocked = buildSystemPrompt('ecosystem', {}, {}, cfg('ecosystem'), { locked: true })
+  check('locked card does not carry the unlocked note', !sysLocked.includes('CARD STATE — UNLOCKED'))
 }
 
 console.log(failures === 0 ? '\n✓ all checks passed\n' : `\n✗ ${failures} check(s) failed\n`)

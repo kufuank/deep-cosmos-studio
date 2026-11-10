@@ -363,6 +363,90 @@ function sceneStateBlock(scenes: unknown[]): string {
 const SEP = '\n\n────────────────────\n\n'
 
 /**
+ * Rules about the turn itself rather than the domain. They live in code, not in
+ * the database protocol, so they hold for every agent whatever protocol
+ * version is served. Free-tier models announced actions ("şimdi çağırıyorum")
+ * and ended the turn, declared a sheet complete with fields still empty, and
+ * skipped announced questions without a word.
+ */
+export const TURN_DISCIPLINE = `TURN DISCIPLINE — HONEST NARRATION
+Your turn ends the moment you stop writing. There is no later step in which you get to finish what you announced.
+- Never announce an action you do not perform in this same response. If you write that you will fill fields, ask questions or call a tool, do it right away in this response; otherwise do not announce it.
+- If you change course mid-response — for example you said you would ask questions, then saw the answers already follow from what is confirmed — say so in one sentence, with the reason, before acting (e.g. "Soru sormaya gerek kalmadığını fark ettim, çünkü …; alanları dolduruyorum.").
+- Report only what tool results confirm. Never say something was saved, processed, called or written unless you called the tool in this response and its result said so.
+- Never call the sheet complete while the sheet state shown to you or the latest set_fields result still lists missing fields. Name the fields that are still missing instead.
+- If you cannot finish everything in this response, say plainly what is done and what remains.`
+
+/** Keys of the sheet fields that still have no value. */
+export function missingFieldKeys(type: CardType, fields: CardFields): string[] {
+  return allFields(schemas[type])
+    .filter((f) => !fields[f.key]?.value?.trim())
+    .map((f) => f.key)
+}
+
+// Turkish first-person future / progressive / optative forms of the verbs an
+// agent uses to announce work ("dolduracağım", "çağırıyorum", "düzelteyim").
+const ACTION_VERB =
+  /(?:çağır|doldur|yaz|güncelle|kaydet|oluştur|sor|seç|başla|devam ed|üret|tamamla|düzelt|ekle|analiz ed|belirl|ilerl|geç)\p{L}*?(?:acağım|eceğim|acağız|eceğiz|ıyorum|iyorum|uyorum|üyorum|ıyoruz|iyoruz|uyoruz|üyoruz|ayım|eyim|alım|elim)(?!\p{L})/iu
+const ACTION_EN = /\b(?:I(?:'ll| will| am going to)|let me|now (?:calling|writing|filling|asking))\b/i
+
+/**
+ * Whether a reply ends by promising work it did not do.
+ *
+ * Judged on the closing sentences only: an announcement mid-reply that was
+ * followed by its result is fine, one that is the last thing said is not. A
+ * reply that ends on a question is waiting for the user, not stalling.
+ */
+export function announcesAction(text: string): boolean {
+  const t = text.trim()
+  if (!t || t.endsWith('?')) return false
+  if (/:\s*$/.test(t)) return true // "…şu çağrı ile belirliyorum:" and then nothing
+  const sentences = t.split(/(?<=[.!…])\s+|\n+/).filter((s) => s.trim())
+  const tail = sentences.slice(-2).join(' ')
+  return ACTION_VERB.test(tail) || ACTION_EN.test(tail)
+}
+
+/** Whether a reply tells the user the sheet is done. */
+export function claimsComplete(text: string): boolean {
+  return /(?:kart|card|sheet)\p{L}*\s+(?:\p{L}+\s+)?(?:tamam|doldurul|complete)|(?:tüm|bütün|all)\s+(?:\d+\s+)?(?:alan|field)\p{L}*\s+(?:\p{L}+\s+)?(?:doldurul|tamamlan|filled|complete)/iu.test(
+    text,
+  )
+}
+
+/** Sent once when a reply announced an action and then ended without it. */
+const FOLLOW_THROUGH_NUDGE =
+  'Your reply ended by announcing an action, but you called no tool, and nothing was done. ' +
+  'If you intend to do it, do it now by calling the tool. If you decided not to, tell the user in Turkish, in one or two sentences, what you decided and why. ' +
+  'If nothing is actually pending, reply with exactly: DONE'
+
+export const MAX_STEPS = 8
+
+/** Why a turn stopped, when it stopped short of finishing. */
+export type TurnCutoff = 'truncated' | 'truncated_empty' | 'step_limit' | 'stalled'
+
+/** The note shown to the user when a turn stopped short — the cause, said plainly. */
+export function cutoffNotice(cut: TurnCutoff): string {
+  switch (cut) {
+    case 'truncated_empty':
+      return '(Cevap çok uzun olduğu için model çıktı sınırına takıldı ve hiçbir şey yazamadan durdu; bu turda hiçbir işlem yapılmadı. "devam et" yazarsanız daha küçük parçalarla sürdürmesi istenir.)'
+    case 'truncated':
+      return '(Cevap çok uzun olduğu için model çıktı sınırına takıldı ve burada kesildi; söylediklerinin devamı ve yapacağını söylediği işlemler gerçekleşmedi. Kaldığı yerden sürdürmesi için "devam et" yazın.)'
+    case 'step_limit':
+      return `(Ajan bu tur için izin verilen ${MAX_STEPS} adımın hepsini kullandı ve işi bitiremeden durdu. Kaldığı yerden sürdürmesi için "devam et" yazın.)`
+    case 'stalled':
+      return '(Ajan yapacağını söylediği adımı gerçekleştirmeden turu bitirdi; o işlem bu turda yapılmadı. Tekrar istemek için "devam et" yazın.)'
+  }
+}
+
+/** Appended when the agent called the sheet complete while fields are still empty. */
+export function incompleteNotice(type: CardType, missing: string[]): string {
+  const labels = new Map(allFields(schemas[type]).map((f) => [f.key, f.label]))
+  const names = missing.map((k) => labels.get(k) ?? k)
+  const shown = names.length > 8 ? `${names.slice(0, 8).join(', ')} ve ${names.length - 8} alan daha` : names.join(', ')
+  return `(Not: Ajan kartın tamamlandığını söyledi, ancak ${missing.length} alan hâlâ boş: ${shown}.)`
+}
+
+/**
  * The system prompt in two halves, so the stable half can be prompt-cached.
  *
  * Role, knowledge, protocol, inherited constraints and the shot list do not
@@ -383,7 +467,7 @@ export function buildSystemBlocks(
     locked?: boolean
   } = {},
 ): SystemBlock[] {
-  const stable = [config.role, `CORE KNOWLEDGE\n${config.knowledge}`, config.protocol]
+  const stable = [config.role, `CORE KNOWLEDGE\n${config.knowledge}`, config.protocol, TURN_DISCIPLINE]
 
   const anc = ancestorBlock(type, ancestors)
   if (anc) {
@@ -400,6 +484,14 @@ export function buildSystemBlocks(
     dynamic.push(
       `CARD STATE — LOCKED
 This card is locked, so its values are frozen and you have no tools to change them. Do not claim to have written anything. If the user asks for a change, tell them to unlock the card first using the Kilidi aç button. You may still discuss the card and produce a protocol improvement proposal.`,
+    )
+  } else {
+    // The proposal tool is offered only once locked. An agent told by its
+    // protocol to propose "once approved" was asked to approve in chat, had no
+    // tool to call, and announced the proposal as processed anyway.
+    dynamic.push(
+      `CARD STATE — UNLOCKED
+The propose_protocol_improvement tool is not available while the card is unlocked; it appears only after the user presses the Kartı kilitle button. If the user approves the card in chat, do not say a proposal was made, sent or processed. Tell them to lock the card with the Kartı kilitle button and then send any message; you will write the proposal in that turn.`,
     )
   }
   if (type === 'storyboard') {
@@ -490,10 +582,13 @@ export async function runAgentTurn(params: {
   let text = ''
   let usage: Usage = { ...EMPTY_USAGE }
   let requests = 0
+  // Stays 'step_limit' unless the loop ends on its own; every early exit sets it.
+  let cutoff: TurnCutoff | null = 'step_limit'
+  let nudged = false
 
   // The model may call set_fields several times before answering; cap the loop
   // so a misbehaving turn cannot spin.
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < MAX_STEPS; i++) {
     params.onStatus?.(i === 0 ? 'Ajan düşünüyor' : 'Ajan devam ediyor')
     requests++
     const res = await streamAnthropic({
@@ -534,9 +629,12 @@ export async function runAgentTurn(params: {
       appended.push(assistantMsg)
     }
 
-    for (const block of res.content) {
-      if (block.type === 'text') text += (text ? '\n\n' : '') + block.text
-    }
+    const stepText = res.content
+      .flatMap((b) => (b.type === 'text' && b.text.trim() ? [b.text] : []))
+      .join('\n\n')
+    // The answer to the follow-through nudge when nothing was pending.
+    const nothingPending = nudged && /^\s*DONE\.?\s*$/i.test(stepText)
+    if (stepText && !nothingPending) text += (text ? '\n\n' : '') + stepText
 
     // max_tokens caps thinking + output combined. A hard request can burn the
     // whole budget on thinking and end with no text and no tool call at all —
@@ -547,13 +645,25 @@ export async function runAgentTurn(params: {
       (b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use',
     )
     if (!toolUses.length) {
-      if (truncated && !text) {
-        text =
-          '(Yanıt, sunucu tarafındaki çıktı uzunluğu sınırına takıldı ve hiçbir içerik üretilemedi. ' +
-          'Lütfen isteği küçültüp tekrar deneyin — örneğin alanları bölüm bölüm doldurtun.)'
-      } else if (truncated) {
-        text += '\n\n(Yanıt uzunluk sınırına takıldığı için burada kesildi.)'
+      if (truncated) {
+        cutoff = text ? 'truncated' : 'truncated_empty'
+        break
       }
+      // The model ended its turn on a promise ("şimdi çağırıyorum") without
+      // the tool call. Ask once for the follow-through; the nudge is not
+      // shown in the chat, only the result.
+      if (!nothingPending && announcesAction(stepText)) {
+        if (!nudged && i < MAX_STEPS - 1) {
+          nudged = true
+          params.onStatus?.('Ajan duyurduğu adımı atmadan durdu — sürdürmesi isteniyor')
+          messages.push({ role: 'user', content: FOLLOW_THROUGH_NUDGE })
+          continue
+        }
+        cutoff = 'stalled'
+        break
+      }
+      // Nudged, and the answer was silence: the announced step still did not happen.
+      cutoff = nudged && !stepText ? 'stalled' : null
       break
     }
 
@@ -690,13 +800,32 @@ export async function runAgentTurn(params: {
         : accepted.length === 0 && truncated
           ? 'This call was cut off by the output token limit before its input arrived — nothing was written. Re-send the fields in smaller batches of at most 10 per call.'
           : `Wrote ${accepted.length} field(s).`
-      results.push({ type: 'tool_result', tool_use_id: tu.id, content: summary })
+      // The sheet state in the system prompt is from the start of the turn, so
+      // without this the agent cannot tell which fields are still empty — and
+      // declared sheets complete with whole sections missing.
+      const missing = sceneCard ? [] : missingFieldKeys(params.type, applyUpdates(params.fields, updates))
+      const remaining = sceneCard
+        ? ''
+        : missing.length
+          ? ` Still missing (${missing.length}): ${missing.join(', ')}. The sheet is not complete.`
+          : ' No field is missing now.'
+      results.push({ type: 'tool_result', tool_use_id: tu.id, content: summary + remaining })
     }
 
     const resultMsg: ApiMessage = { role: 'user', content: results }
     messages.push(resultMsg)
     appended.push(resultMsg)
   }
+
+  // Say why the turn stopped short, in the chat, instead of leaving an
+  // announcement hanging or a generic "try again".
+  const notes: string[] = []
+  if (cutoff) notes.push(cutoffNotice(cutoff))
+  if (!sceneCard && !params.locked && claimsComplete(text)) {
+    const missing = missingFieldKeys(params.type, applyUpdates(params.fields, updates))
+    if (missing.length) notes.push(incompleteNotice(params.type, missing))
+  }
+  if (notes.length) text = [text.trim(), ...notes].filter(Boolean).join('\n\n')
 
   return { text: text.trim(), updates, scenes, sequence, proposal, history: appended, usage, requests }
 }

@@ -470,7 +470,7 @@ function Studio({ session }: { session: Session }) {
                 ? `(Ajan ${res.updates.length} alanı güncelledi, ayrıca bir şey yazmadı.)`
                 : card.status === 'locked'
                   ? '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Kart kilitli — değişiklik için önce kilidi açın.)'
-                  : '(Ajan bu turda ne bir şey yazdı ne de bir alan güncelledi. Lütfen tekrar deneyin; sorun sürerse isteği küçültün.)'),
+                  : '(Model bu turda hiçbir metin ya da işlem üretmeden yanıtını bitirdi ve bir hata da bildirmedi; yani ne yazdı ne de bir alan güncelledi. Aynı mesajı tekrar gönderebilir ya da "devam et" yazabilirsiniz.)'),
             wrote: res.updates.map((u) => u.key),
           },
         ])
